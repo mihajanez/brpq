@@ -1,0 +1,21 @@
+{
+    "configurations": [
+        {
+            "name": "Linux",
+            "includePath": [
+                "${workspaceFolder}/**",
+                "/usr/include/**",
+                "/opt/gurobi1300/linux64/**"
+            ],
+            "defines": [],
+            "cStandard": "c17",
+            "cppStandard": "c++20",
+            "intelliSenseMode": "linux-gcc-x64",
+            "compilerPath": "/usr/bin/g++",
+            "mergeConfigurations": true,
+            "browse": {},
+            "configurationProvider": "llvm-vs-code-extensions.vscode-clangd"
+        }
+    ],
+    "version": 4
+}

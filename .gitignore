@@ -1,0 +1,8 @@
+# build artifacts
+*.o
+*~
+*.bak
+rbrp_ip
+
+# local Claude Code session settings (not project source)
+.claude/
