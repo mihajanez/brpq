@@ -6,3 +6,7 @@ rbrp_ip
 
 # local Claude Code session settings (not project source)
 .claude/
+
+# python virtual environment
+.venv/
+qubo.png
