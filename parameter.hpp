@@ -36,8 +36,6 @@
 
 #include <string>
 
-#include "instance.hpp"
-
 class Parameter {
 public:
   Parameter()
