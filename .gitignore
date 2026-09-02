@@ -10,3 +10,4 @@ rbrp_ip
 # python virtual environment
 .venv/
 qubo.png
+__pycache__/
