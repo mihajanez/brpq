@@ -42,6 +42,15 @@ def load_qubo(path):
     return bqm, names
 
 
+def block_of(name):
+    """'x(4,2)' -> '4': the blocking-block priority a sequence variable belongs
+    to. Every sequence variable for one blocking block must sum to exactly 1
+    (the assignment constraint), so this is the grouping key for the
+    feasibility check in the sampler/QAOA scripts."""
+    inside = name[name.find("(") + 1:name.find(")")]
+    return inside.split(",")[0]
+
+
 def dense_matrix(bqm, n):
     """Upper-triangular QUBO matrix as a NumPy array (rows/cols = column index).
 

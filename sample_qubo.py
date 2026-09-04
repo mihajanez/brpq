@@ -34,13 +34,7 @@ from dwave.cloud.exceptions import (
     SolverNotFoundError,
 )
 
-from load_qubo import load_qubo
-
-
-def block_of(name):
-    """'x(4,2)' -> '4' : the blocking-block priority a sequence var belongs to."""
-    inside = name[name.find("(") + 1:name.find(")")]
-    return inside.split(",")[0]
+from load_qubo import block_of, load_qubo
 
 
 def main():
