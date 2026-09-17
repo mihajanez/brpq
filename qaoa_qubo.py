@@ -27,12 +27,35 @@ Backends (choose exactly one):
                   account (QiskitRuntimeService.save_account(...)) or
                   QISKIT_IBM_TOKEN in the environment.
 
+Before spending real QPU time, run in this order:
+    1. .venv/bin/python qaoa_qubo.py problem.qubo -p 1 --fake FakeMelbourneV2
+       -- classical simulation with the target device's noise model, so you
+       see roughly how the algorithm will behave. Copy the "parameters: ..."
+       line it prints at the end.
+    2. .venv/bin/python qaoa_qubo.py problem.qubo -p 1 --ibm --estimate
+       -- validates the circuit against a real device's basis gates and
+       coupling map (no job submitted), and prints a lower-bound QPU time
+       estimate for the full run (see report_estimate()'s output for what it
+       does and doesn't include).
+    3a. .venv/bin/python qaoa_qubo.py problem.qubo -p 1 --ibm
+        -- the real run with the full optimization loop, once 1-2 look
+        reasonable -- but note --estimate's job-count warning: --maxiter
+        iterations x --restarts is that many separate Runtime jobs.
+    3b. .venv/bin/python qaoa_qubo.py problem.qubo -p 1 --ibm --no-optimize \
+            --init-params <the "parameters: ..." line from step 1>
+        -- the cheaper alternative: skip optimizing on hardware altogether
+        and spend real QPU time on a single sampling job with angles already
+        tuned in step 1.
+
 Usage:
     .venv/bin/python qaoa_qubo.py problem.qubo -p 1
     .venv/bin/python qaoa_qubo.py problem.qubo -p 2 --restarts 5 --shots 4096
     .venv/bin/python qaoa_qubo.py problem.qubo -p 1 --fake FakeMelbourneV2
+    .venv/bin/python qaoa_qubo.py problem.qubo -p 1 --ibm --estimate
     .venv/bin/python qaoa_qubo.py problem.qubo -p 1 --ibm
     .venv/bin/python qaoa_qubo.py problem.qubo -p 1 --ibm ibm_brisbane
+    .venv/bin/python qaoa_qubo.py problem.qubo -p 1 --ibm --no-optimize \
+        --init-params 1.570796,0.785398
 
 Interpreting results (see also sample_qubo.py):
   - the exported QUBO drops the objective's constant term, and the
@@ -49,6 +72,7 @@ Interpreting results (see also sample_qubo.py):
 import argparse
 import sys
 from itertools import product
+from types import SimpleNamespace
 
 import numpy as np
 from qiskit.circuit.library import QAOAAnsatz
@@ -98,11 +122,13 @@ def brute_force_optimum(bqm, n, limit):
 
 
 def build_backend(args):
-    """Returns (estimator, sampler, transpile) for the chosen backend.
+    """Returns (estimator, sampler, pm, backend) for the chosen backend.
 
-    transpile(ansatz) -> (isa_ansatz, layout_fn) where layout_fn(op) maps a
-    Hamiltonian defined on logical qubits onto the transpiled circuit's
-    physical layout (identity when no transpilation is needed).
+    pm.run(ansatz) -> isa_ansatz transpiles (and, for --ibm/--fake, validates
+    against the device's basis gates and coupling map). backend is the
+    BackendV2 used for transpilation and, via backend.target, timing data for
+    --estimate; it is None for the ideal statevector path, which has no
+    associated device to validate against or time.
     """
     if args.ibm is not None:
         from qiskit_ibm_runtime import EstimatorV2, QiskitRuntimeService, SamplerV2
@@ -114,7 +140,7 @@ def build_backend(args):
               f"queue may apply)")
         pm = generate_preset_pass_manager(optimization_level=3, backend=backend)
         estimator, sampler = EstimatorV2(mode=backend), SamplerV2(mode=backend)
-        return estimator, sampler, pm
+        return estimator, sampler, pm, backend
 
     if args.fake is not None:
         import qiskit_ibm_runtime.fake_provider as fake_provider
@@ -128,7 +154,7 @@ def build_backend(args):
               f"({backend.num_qubits} qubits)")
         pm = generate_preset_pass_manager(optimization_level=3, backend=backend)
         estimator, sampler = AerEstimator.from_backend(backend), AerSampler.from_backend(backend)
-        return estimator, sampler, pm
+        return estimator, sampler, pm, backend
 
     print("backend: ideal statevector simulator"
           + (f" ({args.shots} shots)" if args.shots else ", exact expectation"))
@@ -140,7 +166,62 @@ def build_backend(args):
     # coupling map, so no routing) does exactly that decomposition.
     pm = generate_preset_pass_manager(
         optimization_level=1, basis_gates=["rz", "sx", "x", "cx"])
-    return StatevectorEstimator(), StatevectorSampler(), pm
+    return StatevectorEstimator(), StatevectorSampler(), pm, None
+
+
+def report_estimate(args, isa_ansatz, isa_meas, backend):
+    """Print ISA-compatibility stats and a lower-bound QPU time estimate for
+    running the full QAOA loop against --ibm/--fake, then let the caller
+    exit without running the optimizer or submitting anything.
+
+    Reaching this function already proves the circuit transpiles onto the
+    target's basis gates and coupling map -- that "verification" happened in
+    pm.run() (called before this, in main()) and would have raised there if
+    the circuit didn't fit.
+    """
+    if backend is None:
+        print("--estimate needs real device timing data: pass --ibm or "
+              "--fake NAME", file=sys.stderr)
+        return 2
+
+    name = getattr(backend, "name", str(backend))
+    ops = isa_ansatz.count_ops()
+    two_qubit = sum(c for g, c in ops.items() if g in ("cx", "cz", "ecr"))
+    print(f"\nvalidated against {name}'s ISA (transpiled without error): "
+          f"{isa_ansatz.num_qubits} qubits, depth {isa_ansatz.depth()}, "
+          f"{sum(ops.values())} gates {dict(ops)} ({two_qubit} two-qubit)")
+
+    # estimate_duration walks the longest dependency path using the target's
+    # per-instruction durations -- the same data source real Runtime jobs are
+    # billed against, computed here entirely locally.
+    eval_time = isa_ansatz.estimate_duration(backend.target, unit="s")
+    sample_time = isa_meas.estimate_duration(backend.target, unit="s")
+    shots = args.shots or 4096
+    evaluations = args.restarts * args.maxiter
+    active_time = eval_time * shots * evaluations + sample_time * shots
+
+    print(f"gate time per cost-function circuit: {eval_time * 1e6:.1f} us")
+    print(f"gate+readout time for the final sampling circuit: "
+          f"{sample_time * 1e6:.1f} us")
+    print(f"shots per circuit: {shots}")
+    print(f"cost-function circuit evaluations: {evaluations} "
+          f"({args.restarts} restart(s) x {args.maxiter} optimizer "
+          "iterations) + 1 final sampling call")
+    print(f"\nestimated ACTIVE QPU time: {active_time:.3g} s "
+          f"({active_time / 60:.2f} min)")
+    print(
+        "\nThis is a lower bound on gate time only. It excludes IBM's "
+        "per-shot reset/rep-delay (commonly ~100-300 us, often bigger than "
+        "the gate time itself for a circuit this shallow), and it excludes "
+        "queueing entirely. In this script each of the "
+        f"{evaluations} classical-optimizer iterations is its own Runtime "
+        "job; public-queue waits of seconds to tens of minutes per job are "
+        "common, so wall-clock time can be orders of magnitude above the "
+        "active-time figure above. For a real --ibm run, keep --maxiter and "
+        "--restarts small, or tune angles on --fake first and use --ibm "
+        "only for the final sampling call."
+    )
+    return 0
 
 
 def main():
@@ -172,6 +253,21 @@ def main():
     parser.add_argument("--brute-force-limit", type=int, default=20,
                         help="compute the true optimum by brute force when "
                              "n is at most this (default: 20)")
+    parser.add_argument("--estimate", action="store_true",
+                        help="validate the circuit against --ibm/--fake's "
+                             "ISA, print its stats and a lower-bound QPU "
+                             "time estimate for the full run, then exit -- "
+                             "no job is submitted and no optimizer runs")
+    parser.add_argument("--init-params", metavar="B1,G1,B2,G2,...",
+                        help="comma-separated QAOA angles to start from "
+                             "(as printed at the end of a run), instead of "
+                             "the first random restart")
+    parser.add_argument("--no-optimize", action="store_true",
+                        help="skip the classical optimization loop entirely "
+                             "and sample directly with --init-params "
+                             "(required). Use this to spend real --ibm time "
+                             "only on the final sampling call, after tuning "
+                             "angles on --fake or the default simulator")
     args = parser.parse_args()
 
     bqm, names = load_qubo(args.qubo)
@@ -179,8 +275,28 @@ def main():
     print(f"{n} qubits, {len(cost_op)} Pauli terms, QAOA depth p={args.reps}")
 
     ansatz = QAOAAnsatz(cost_operator=cost_op, reps=args.reps)
+
+    init_params = None
+    if args.init_params:
+        try:
+            init_params = np.array(
+                [float(v) for v in args.init_params.replace(",", " ").split()])
+        except ValueError:
+            print(f"--init-params must be a list of numbers, got: "
+                  f"{args.init_params!r}", file=sys.stderr)
+            return 2
+        if len(init_params) != ansatz.num_parameters:
+            print(f"--init-params has {len(init_params)} values but this "
+                  f"ansatz (p={args.reps}) needs {ansatz.num_parameters}",
+                  file=sys.stderr)
+            return 2
+
+    if args.no_optimize and init_params is None:
+        print("--no-optimize needs --init-params", file=sys.stderr)
+        return 2
+
     try:
-        estimator, sampler, pm = build_backend(args)
+        estimator, sampler, pm, backend = build_backend(args)
     except AccountNotFoundError as e:
         print(f"\ncannot reach IBM Quantum: {e}\n"
               "save an account with QiskitRuntimeService.save_account(...) "
@@ -191,31 +307,51 @@ def main():
     layout = getattr(isa_ansatz, "layout", None)
     isa_cost_op = cost_op.apply_layout(layout) if layout is not None else cost_op
 
-    # StatevectorEstimator/AerEstimator take a target standard error, not a
-    # shot count directly; 1/sqrt(shots) is the usual estimator-noise scaling.
-    # Runtime EstimatorV2 (--ibm) always runs real shots regardless.
-    precision = 1.0 / np.sqrt(args.shots) if args.shots else None
-
-    def expectation(params):
-        pub = (isa_ansatz, [isa_cost_op], [params])
-        result = estimator.run([pub], precision=precision).result()
-        return float(result[0].data.evs[0])
-
-    rng = np.random.default_rng(args.seed)
-    best = None
-    for r in range(args.restarts):
-        x0 = rng.uniform(0.0, np.pi, size=ansatz.num_parameters)
-        res = minimize(expectation, x0, method=args.optimizer,
-                       options={"maxiter": args.maxiter})
-        print(f"  restart {r}: <H> = {res.fun + offset:.4f} "
-              f"({res.nfev} evals)")
-        if best is None or res.fun < best.fun:
-            best = res
-
-    print(f"optimized <H_ising> + offset = {best.fun + offset:.4f}")
-
     isa_meas = isa_ansatz.copy()
     isa_meas.measure_all()
+
+    if args.estimate:
+        return report_estimate(args, isa_ansatz, isa_meas, backend)
+
+    if args.no_optimize:
+        best = SimpleNamespace(x=init_params)
+        print("skipping optimization, using --init-params as given "
+              "(no cost-function circuit evaluations, no jobs beyond the "
+              "final sampling call below)")
+    else:
+        # StatevectorEstimator/AerEstimator take a target standard error, not
+        # a shot count directly; 1/sqrt(shots) is the usual estimator-noise
+        # scaling. Runtime EstimatorV2 (--ibm) always runs real shots
+        # regardless.
+        precision = 1.0 / np.sqrt(args.shots) if args.shots else None
+
+        def expectation(params):
+            pub = (isa_ansatz, [isa_cost_op], [params])
+            result = estimator.run([pub], precision=precision).result()
+            return float(result[0].data.evs[0])
+
+        rng = np.random.default_rng(args.seed)
+        best = None
+        for r in range(args.restarts):
+            if r == 0 and init_params is not None:
+                x0 = init_params
+            else:
+                x0 = rng.uniform(0.0, np.pi, size=ansatz.num_parameters)
+            res = minimize(expectation, x0, method=args.optimizer,
+                           options={"maxiter": args.maxiter})
+            print(f"  restart {r}: <H> = {res.fun + offset:.4f} "
+                  f"({res.nfev} evals)")
+            if best is None or res.fun < best.fun:
+                best = res
+
+        print(f"optimized <H_ising> + offset = {best.fun + offset:.4f}")
+
+    params_str = ",".join(f"{v:.6f}" for v in best.x)
+    print(f"parameters: {params_str}")
+    if not args.no_optimize:
+        print("  (rerun sampling only, e.g. on --ibm, with: "
+              f"--init-params {params_str} --no-optimize)")
+
     shots = args.shots or 4096
     sample_result = sampler.run([(isa_meas, best.x)], shots=shots).result()
     counts = sample_result[0].data.meas.get_counts()
