@@ -192,10 +192,12 @@ bool BIPModel::solve(const Parameter &parameter) {
            "---------------------------\n\n");
     std::cout << "IP solution: ";
     GRBVar *model_vars = model->getVars();
-    for (int j = 0; j < model->get(GRB_IntAttr_NumVars); j++)
-      if (model_vars[j].get(GRB_DoubleAttr_X) > 0) {
-        std::cout << model_vars[j].get(GRB_StringAttr_VarName) << "   ";
-      }
+    if (model->get(GRB_IntAttr_SolCount) > 0) {
+      for (int j = 0; j < model->get(GRB_IntAttr_NumVars); j++)
+        if (model_vars[j].get(GRB_DoubleAttr_X) > 0) {
+          std::cout << model_vars[j].get(GRB_StringAttr_VarName) << "   ";
+        }
+    }
     std::cout << std::endl;
 
     LBTime += model->get(GRB_DoubleAttr_Runtime);
@@ -341,10 +343,12 @@ bool BIPModel::solve(const Parameter &parameter) {
            "---------------------------\n\n");
     std::cout << "IP solution: ";
     model_vars = model->getVars();
-    for (int j = 0; j < model->get(GRB_IntAttr_NumVars); j++)
-      if (model_vars[j].get(GRB_DoubleAttr_X) > 0) {
-        std::cout << model_vars[j].get(GRB_StringAttr_VarName) << "   ";
-      }
+    if (model->get(GRB_IntAttr_SolCount) > 0) {
+      for (int j = 0; j < model->get(GRB_IntAttr_NumVars); j++)
+        if (model_vars[j].get(GRB_DoubleAttr_X) > 0) {
+          std::cout << model_vars[j].get(GRB_StringAttr_VarName) << "   ";
+        }
+    }
     std::cout << std::endl;
 
     optimstatus = model->get(GRB_IntAttr_Status);
@@ -523,7 +527,7 @@ void BIPModel::expand_solution(const int threshold, const bool verbose) {
       Sequence &origseq = sequence[b1][solution[b1]];
       origseq.type = Inactive;
       std::cout << "Removing variable "
-                << origseq.qvariable->get(GRB_StringAttr_VarName) << std::endl;
+                << origseq.variable->get(GRB_StringAttr_VarName) << std::endl;
       model->remove(*(origseq.variable));
 
       for (const auto &bb2 : bayState.blockingBlock) {
