@@ -117,6 +117,14 @@ public:
 
   bool export_qubo(const std::string &filename) const;
 
+  // Prints the IP variables selected in the optimal solution of the IP
+  // model that was solved to build the exported QUBO (i.e. the x(p,sq)
+  // variables also captured by capture_qubo()/export_qubo()), together
+  // with each selected variable's cost and the total cost of the
+  // solution. Must be called after solve() and only when upper_bound()
+  // is not -1 (i.e. a feasible solution was found).
+  void print_solution(std::ostream &os) const;
+
 private:
   void add_new_sequence(const int type,
                         const int remainingRelocations,
@@ -183,6 +191,14 @@ private:
   // only this, so it stays valid after solve() has returned.
   bool quboCaptured;
   std::vector<std::string> quboVariableNames;
+  // per-variable blocking-block priority, cost (Sequence::length()) and
+  // relocation path, indexed the same way as quboVariableNames; captured
+  // alongside it so export_qubo() can also dump the relocations, letting an
+  // external tool (e.g. a Python script checking a quantum-computer
+  // bitstring) rebuild relocation diagrams without re-running the solver.
+  std::vector<int> quboVariablePriority;
+  std::vector<int> quboVariableCost;
+  std::vector<std::vector<Relocation>> quboVariableRelocations;
   std::map<std::pair<int, int>, double> quboCoefficients;
 
   int initialNumberOfVariables, initialNumberOfConstraints;

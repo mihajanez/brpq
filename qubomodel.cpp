@@ -666,6 +666,30 @@ void QUBOModel::expand_solution(const int threshold, const bool verbose)
           // qmodel->setObjective(qmodel->getObjective() - *(qConflictConstraint[b1][b2][origseq.no]));
           qConflictConstraint[b1][b2][origseq.no] = nullptr;
         }
+        else if (b2 > b1)
+        {
+          // origseq.qvariable may also appear as the *second* sequence in a
+          // conflict recorded under [b2][b1][sq2] (i.e. conflict[b2][b1][sq2][origseq.no]).
+          // Unlike conflictConstraint (a real GRBConstr, auto-fixed up by
+          // model->remove(GRBVar) below), qConflictConstraint entries are
+          // plain GRBQuadExpr not owned by qmodel, so a stale term
+          // referencing the removed qvariable must be stripped explicitly
+          // or setObjective() throws once the variable is gone from qmodel.
+          // Bounded by conflict[b2][b1].size() rather than sequence[b2].size():
+          // sequence[b2] may already have grown earlier in this same
+          // expand_solution() call (if b2 was processed before b1 above),
+          // but conflict[b2][b1] is only resized by update_conflict_constraints(),
+          // which hasn't run yet for those newly-added sequences.
+          for (int sq2 = 0; sq2 < static_cast<int>(conflict[b2][b1].size()); ++sq2)
+          {
+            if (origseq.no < static_cast<int>(conflict[b2][b1][sq2].size()) &&
+                conflict[b2][b1][sq2][origseq.no] &&
+                qConflictConstraint[b2][b1][sq2] != nullptr)
+            {
+              qConflictConstraint[b2][b1][sq2]->remove(*(origseq.qvariable));
+            }
+          }
+        }
       }
     }
   }
@@ -1556,6 +1580,29 @@ void QUBOModel::capture_qubo()
     quboVariableNames[static_cast<std::size_t>(i)] = vars[i].get(GRB_StringAttr_VarName);
   }
 
+  quboVariablePriority.assign(static_cast<std::size_t>(n), -1);
+  quboVariableCost.assign(static_cast<std::size_t>(n), 0);
+  quboVariableRelocations.assign(static_cast<std::size_t>(n), std::vector<Relocation>());
+  for (const auto &bb : bayState.blockingBlock)
+  {
+    for (const auto &seq : sequence[bb.priority])
+    {
+      if (seq.qvariable == nullptr)
+      {
+        continue;
+      }
+      const int idx = seq.qvariable->index();
+      if (idx < 0 || idx >= n)
+      {
+        continue;
+      }
+      quboVariablePriority[static_cast<std::size_t>(idx)] = bb.priority;
+      quboVariableCost[static_cast<std::size_t>(idx)] = seq.length();
+      quboVariableRelocations[static_cast<std::size_t>(idx)]
+          .assign(seq.relocations.begin(), seq.relocations.end());
+    }
+  }
+
   quboCoefficients.clear();
 
   const GRBQuadExpr obj = qmodel->getObjective();
@@ -1593,6 +1640,80 @@ void QUBOModel::capture_qubo()
   quboCaptured = true;
 }
 
+void QUBOModel::print_solution(std::ostream &os) const
+{
+  // solutionUB is only filled in when the branch-and-bound loop breaks via
+  // its "found a solutionUB this iteration" paths; when the initial greedy
+  // upper bound already matches the LP lower bound, the loop can finish
+  // without ever touching it, leaving it at its -1 sentinel. Fall back to
+  // the plain LB-iteration assignment (solution) in that case: once
+  // lowerBound == upperBound, that assignment's total cost equals the
+  // proven optimum, so it IS the optimal IP solution -- the same one the
+  // greedy upper bound happened to match -- even if some of its sequences
+  // are still "Blocking" placeholders rather than fully expanded paths.
+  // Only trust it once its cost is checked against the reported optimum,
+  // since on an unresolved (e.g. time-limited) run the last LB iteration
+  // may not correspond to the greedy solution actually reported.
+  bool solutionUBValid = true;
+  for (const auto &bb : bayState.blockingBlock)
+  {
+    if (solutionUB[bb.priority] < 0 ||
+        solutionUB[bb.priority] >= static_cast<int>(sequence[bb.priority].size()))
+    {
+      solutionUBValid = false;
+      break;
+    }
+  }
+
+  const std::vector<int> *chosen = nullptr;
+  if (solutionUBValid)
+  {
+    chosen = &solutionUB;
+  }
+  else
+  {
+    int total = 0;
+    bool valid = true;
+    for (const auto &bb : bayState.blockingBlock)
+    {
+      const int sq = solution[bb.priority];
+      if (sq < 0 || sq >= static_cast<int>(sequence[bb.priority].size()))
+      {
+        valid = false;
+        break;
+      }
+      total += sequence[bb.priority][sq].length();
+    }
+    if (valid && total == upper_bound())
+    {
+      chosen = &solution;
+    }
+  }
+
+  if (chosen == nullptr)
+  {
+    os << "IP variables in the optimal solution: not available here "
+          "(no IP model assignment matching the reported optimum was "
+          "retained)" << std::endl;
+    return;
+  }
+
+  os << bayState.blockingBlock.size() << " IP variables in the optimal solution:" << std::endl;
+
+  int totalCost = 0;
+  for (const auto &bb : bayState.blockingBlock)
+  {
+    const int sq = (*chosen)[bb.priority];
+    const Sequence &seq = sequence[bb.priority][sq];
+    const int cost = seq.length();
+
+    os << "  x(" << bb.priority << "," << sq << ") = 1, cost = " << cost << std::endl;
+    totalCost += cost;
+  }
+
+  os << "Cost of the optimal solution: " << totalCost << std::endl;
+}
+
 // Dumps the QUBO objective captured by capture_qubo() as a plain-text,
 // dependency-free triplet format: "<i> <j> <coefficient>" per line, i<=j,
 // diagonal = linear bias. Directly loadable as a dimod QUBO dict, e.g. via
@@ -1617,6 +1738,24 @@ bool QUBOModel::export_qubo(const std::string &filename) const
   for (std::size_t i = 0; i < quboVariableNames.size(); ++i)
   {
     ofs << "# var " << i << " " << quboVariableNames[i] << "\n";
+  }
+  // "# cost <i> <n>": selecting variable i costs n relocations.
+  // "# reloc <i> <period> <src> <dst>": one line per relocation in
+  // variable i's path, in order. Together these let a downstream tool
+  // (see verify_solution.py) rebuild and print the relocation diagram
+  // for any feasible combination of selected variables, including a
+  // bitstring sampled on a quantum computer, without needing Gurobi.
+  for (std::size_t i = 0; i < quboVariableNames.size(); ++i)
+  {
+    if (quboVariablePriority[i] < 0)
+    {
+      continue;
+    }
+    ofs << "# cost " << i << " " << quboVariableCost[i] << "\n";
+    for (const auto &r : quboVariableRelocations[i])
+    {
+      ofs << "# reloc " << i << " " << r.period << " " << r.src << " " << r.dst << "\n";
+    }
   }
   for (const auto &entry : quboCoefficients)
   {

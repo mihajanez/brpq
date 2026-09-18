@@ -96,6 +96,10 @@ int solve(const Instance &instance, const Parameter &parameter)
     if (qubom.export_qubo(parameter.quboOutputFile))
     {
       std::cerr << "QUBO exported to " << parameter.quboOutputFile << std::endl;
+      if (qubom.upper_bound() != -1)
+      {
+        qubom.print_solution(std::cout);
+      }
     }
     else
     {
