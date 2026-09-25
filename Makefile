@@ -4,7 +4,7 @@
 #  $Date: 2021/02/24 10:18:02 $
 #  $Author: tanaka $
 #
-.PHONY: all strip clean depend
+.PHONY: all strip clean depend gui
 GUROBI_ROOT = /opt/gurobi1300/linux64
 GUROBI_LIBS = -lgurobi_g++8.5 -lgurobi130
 
@@ -37,6 +37,10 @@ $(TARGET): $(OBJS)
 
 strip:: $(TARGET)
 	@strip $(TARGET)
+
+gui: $(TARGET)
+	@PY=`test -x .venv/bin/python && echo .venv/bin/python || echo python3`; \
+	$$PY -m gui.server --open
 
 clean:
 	rm -f $(TARGET) $(OBJS) *~ *.bak #*

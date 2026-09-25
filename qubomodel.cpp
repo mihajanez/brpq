@@ -37,6 +37,7 @@
 #include <iostream>
 #include <iomanip>
 #include <map>
+#include <set>
 #include <utility>
 #include <vector>
 #include <list>
@@ -101,10 +102,6 @@ bool QUBOModel::solve(const Parameter &parameter)
     ss << "a(" << bb.priority << ")";
     assignmentConstraint[bb.priority] = model->addConstr(static_cast<GRBLinExpr>(0.0), GRB_EQUAL, 1.0,
                                                          ss.str());
-    qAssignmentConstraint[bb.priority] = GRBLinExpr(1.0);
-
-    qObjective[bb.priority] = GRBLinExpr(0.0);
-    // std::cout << "qObjective=" << qObjective[bb.priority] << std::endl;
   }
   // std::cout << "assignment constraints ok" << std::endl;
 
@@ -126,9 +123,6 @@ bool QUBOModel::solve(const Parameter &parameter)
     sequence[bb.priority].reserve(100);
     conflict[bb.priority].resize(bb.priority);
     conflictConstraint[bb.priority].resize(bb.priority);
-
-    // std::cout << "qConflictConstraint=" << qConflictConstraint[bb.priority].size() << std::endl;
-    qConflictConstraint[bb.priority].resize(bb.priority);
   }
 
   // lower bound constraint
@@ -151,20 +145,6 @@ bool QUBOModel::solve(const Parameter &parameter)
     }
   }
 #endif
-
-  // penalty for QUBO model
-  double penalty = 0.0;
-  for (const auto &bb : bayState.blockingBlock)
-  {
-    for (int sq = lastNumberOfSequences[bb.priority];
-         sq < static_cast<int>(sequence[bb.priority].size()); ++sq)
-    {
-      if (static_cast<double>(sequence[bb.priority][sq].length()) > penalty)
-      {
-        penalty = static_cast<double>(sequence[bb.priority][sq].length());
-      }
-    }
-  }
 
   add_variables();
   update_conflict_constraints();
@@ -201,29 +181,17 @@ bool QUBOModel::solve(const Parameter &parameter)
         break;
       }
       model->set(GRB_DoubleParam_TimeLimit, parameter.timeLimit - 0.001 * msec);
+      qmodel->set(GRB_DoubleParam_TimeLimit, parameter.timeLimit - 0.001 * msec);
     }
 
     // --------- add QUBO begin ----------------------------
-
-    // penalty for QUBO model
-    for (const auto &bb : bayState.blockingBlock)
-    {
-      for (int sq = lastNumberOfSequences[bb.priority];
-           sq < static_cast<int>(sequence[bb.priority].size()); ++sq)
-      {
-        if (static_cast<double>(sequence[bb.priority][sq].length()) > penalty)
-        {
-          penalty = static_cast<double>(sequence[bb.priority][sq].length());
-        }
-      }
-    }
 
     if (parameter.verbose > 1)
     {
       print_ip_debug();
     }
 
-    update_qubo_objective(penalty, parameter.verbose > 1);
+    update_qubo_objective(parameter.verbose > 1);
 
     printf("\n\n----------------- IP optimization begin ---------------------------\n\n");
     model->optimize();
@@ -243,6 +211,8 @@ bool QUBOModel::solve(const Parameter &parameter)
     printf("\n\n----------------- QUBO optimization begin ---------------------------\n\n");
     qmodel->optimize();
     printf("\n----------------- QUBO optimization end ---------------------------\n\n");
+    report_qubo("ub");
+    report_qubo("lb");
     if (parameter.verbose > 1)
     {
       std::cout << "QUBO solution: ";
@@ -356,22 +326,10 @@ bool QUBOModel::solve(const Parameter &parameter)
         break;
       }
       model->set(GRB_DoubleParam_TimeLimit, parameter.timeLimit - 0.001 * msec);
+      qmodel->set(GRB_DoubleParam_TimeLimit, parameter.timeLimit - 0.001 * msec);
     }
 
     // --------- add QUBO begin ----------------------------
-
-    // penalty for QUBO model
-    for (const auto &bb : bayState.blockingBlock)
-    {
-      for (int sq = lastNumberOfSequences[bb.priority];
-           sq < static_cast<int>(sequence[bb.priority].size()); ++sq)
-      {
-        if (static_cast<double>(sequence[bb.priority][sq].length()) > penalty)
-        {
-          penalty = static_cast<double>(sequence[bb.priority][sq].length());
-        }
-      }
-    }
 
     model->update();
     qmodel->update();
@@ -381,7 +339,7 @@ bool QUBOModel::solve(const Parameter &parameter)
       print_ip_debug();
     }
 
-    update_qubo_objective(penalty, parameter.verbose > 1);
+    update_qubo_objective(parameter.verbose > 1);
 
     printf("\n\n----------------- IP optimization begin ---------------------------\n\n");
     model->optimize();
@@ -493,6 +451,12 @@ bool QUBOModel::solve(const Parameter &parameter)
 
   totalTime += msec * 0.001;
 
+  // The loop can add sequences after its last objective rebuild, which would
+  // leave those variables in qmodel but outside the objective -- an exported
+  // model whose one-hot groups are incomplete. Rebuild once more so the export
+  // always matches the final variable set (and gets the tightest pruning, the
+  // upper bound now being final).
+  update_qubo_objective(false);
   capture_qubo();
 
   delete m;
@@ -643,8 +607,6 @@ void QUBOModel::expand_solution(const int threshold, const bool verbose)
       std::cout << "Removing variable " << origseq.qvariable->get(GRB_StringAttr_VarName) << std::endl;
       model->remove(*(origseq.variable));
 
-      qObjective[b1].remove(*(origseq.qvariable));
-      qAssignmentConstraint[b1].remove(*(origseq.qvariable));
       qmodel->remove(*(origseq.qvariable));
       /*GRBQuadExpr new_objective = qmodel->getObjective();
       GRBLinExpr lin_objective = qmodel->getObjective().getLinExpr();
@@ -662,33 +624,6 @@ void QUBOModel::expand_solution(const int threshold, const bool verbose)
         {
           model->remove(*(conflictConstraint[b1][b2][origseq.no]));
           conflictConstraint[b1][b2][origseq.no] = nullptr;
-
-          // qmodel->setObjective(qmodel->getObjective() - *(qConflictConstraint[b1][b2][origseq.no]));
-          qConflictConstraint[b1][b2][origseq.no] = nullptr;
-        }
-        else if (b2 > b1)
-        {
-          // origseq.qvariable may also appear as the *second* sequence in a
-          // conflict recorded under [b2][b1][sq2] (i.e. conflict[b2][b1][sq2][origseq.no]).
-          // Unlike conflictConstraint (a real GRBConstr, auto-fixed up by
-          // model->remove(GRBVar) below), qConflictConstraint entries are
-          // plain GRBQuadExpr not owned by qmodel, so a stale term
-          // referencing the removed qvariable must be stripped explicitly
-          // or setObjective() throws once the variable is gone from qmodel.
-          // Bounded by conflict[b2][b1].size() rather than sequence[b2].size():
-          // sequence[b2] may already have grown earlier in this same
-          // expand_solution() call (if b2 was processed before b1 above),
-          // but conflict[b2][b1] is only resized by update_conflict_constraints(),
-          // which hasn't run yet for those newly-added sequences.
-          for (int sq2 = 0; sq2 < static_cast<int>(conflict[b2][b1].size()); ++sq2)
-          {
-            if (origseq.no < static_cast<int>(conflict[b2][b1][sq2].size()) &&
-                conflict[b2][b1][sq2][origseq.no] &&
-                qConflictConstraint[b2][b1][sq2] != nullptr)
-            {
-              qConflictConstraint[b2][b1][sq2]->remove(*(origseq.qvariable));
-            }
-          }
         }
       }
     }
@@ -978,9 +913,6 @@ void QUBOModel::add_variables()
                                                                     [sq]
                                                                         .length()),
                                         GRB_BINARY, ss.str()));
-      qObjective[bb.priority] += static_cast<double>(sequence[bb.priority][sq].length()) * (*(sequence[bb.priority][sq].qvariable));
-
-      qAssignmentConstraint[bb.priority] -= *(sequence[bb.priority][sq].qvariable);
     }
   }
 }
@@ -1173,8 +1105,6 @@ void QUBOModel::update_conflict_constraints()
         conflictp.resize(sequence[b1].size());
         conflictConstraintp.resize(sequence[b1].size(), nullptr);
 
-        std::vector<GRBQuadExpr *> &qConflictConstraintp = qConflictConstraint[b1][b2];
-        qConflictConstraintp.resize(sequence[b1].size(), nullptr);
 #if 1
         if (solution[b1] >= 0)
         {
@@ -1344,16 +1274,11 @@ void QUBOModel::add_conflict_constraint(const Sequence &seq1,
     conflictConstraint[b1][b2][seq1.no] = new GRBConstr;
     *(conflictConstraint[b1][b2][seq1.no]) = model->addConstr(*(seq1.variable) + *(seq2.variable),
                                                               GRB_LESS_EQUAL, 1.0, ss.str());
-
-    qConflictConstraint[b1][b2][seq1.no] = new GRBQuadExpr;
-    qConflictConstraint[b1][b2][seq1.no]->addTerm(1.0, *(seq1.qvariable), *(seq2.qvariable));
   }
   else
   {
     model->chgCoeff(*(conflictConstraint[b1][b2][seq1.no]),
                     *(seq2.variable), 1.0);
-
-    qConflictConstraint[b1][b2][seq1.no]->addTerm(1.0, *(seq1.qvariable), *(seq2.qvariable));
   }
 }
 
@@ -1399,27 +1324,290 @@ GRBQuadExpr QUBOModel::squared_penalty(const GRBLinExpr &expr) const
   return result;
 }
 
-// Builds the QUBO penalty for every capacity constraint
-// (sum of x_i relocating into a stack during a period <= slack), by
-// rescanning the currently-active sequences from scratch. This mirrors the
-// bucketing done by update_capacity_constraints()/add_capacity_constraint()
-// for the IP side, but is recomputed fresh on every call rather than kept
-// incrementally in sync -- capacity constraints have no per-sequence
-// reverse index (unlike qConflictConstraint), so there is no cheap, safe
-// way to remove a single sequence's contribution once a sequence becomes
-// Inactive. The slack binary variables themselves ARE persistent: they are
-// created once per (period,stack) bucket (in capacitySlackVars) and reused
-// on every subsequent call so repeated rebuilds don't leak variables into
-// qmodel.
-GRBQuadExpr QUBOModel::build_capacity_penalty()
+// An upper bound on the optimum of the *current* sequence model: the incumbent
+// if there is one, otherwise the cost of the most expensive selection. Any
+// valid upper bound works; a tighter one buys smaller penalty weights.
+int QUBOModel::qubo_upper_bound() const
 {
-  std::map<std::pair<int, int>, GRBLinExpr> bucket;
+  int bound = 0;
+  for (const auto &bb : bayState.blockingBlock)
+  {
+    int worst = 0;
+    for (const auto &seq : sequence[bb.priority])
+    {
+      if (seq.type != Inactive)
+      {
+        worst = std::max(worst, seq.length());
+      }
+    }
+    bound += worst;
+  }
+  if (bestSolution != nullptr)
+  {
+    bound = std::min(bound, bestSolution->number_of_relocations());
+  }
+  if (upperBound < bayState.numberOfBlocks * bayState.numberOfTiers)
+  {
+    bound = std::min(bound, upperBound);
+  }
+  return bound;
+}
+
+// Drops sequence variables that cannot appear in any selection at least as good
+// as the incumbent: a selection containing sq costs at least length(sq) plus the
+// cheapest sequence of every other blocking block. The cheapest sequence of each
+// block always survives (their sum is a lower bound on the optimum, hence on the
+// bound used here), so no group is ever emptied and the model's optimum is kept.
+void QUBOModel::prune_qubo_variables(const bool verbose)
+{
+  const int bound = qubo_upper_bound();
+  int minimumTotal = 0;
+  std::vector<int> cheapest(bayState.numberOfBlocks, 0);
+
+  for (const auto &bb : bayState.blockingBlock)
+  {
+    int best = -1;
+    quboPruned[bb.priority].assign(sequence[bb.priority].size(), 0);
+    for (const auto &seq : sequence[bb.priority])
+    {
+      if (seq.type != Inactive && (best < 0 || seq.length() < best))
+      {
+        best = seq.length();
+      }
+    }
+    cheapest[bb.priority] = std::max(best, 0);
+    minimumTotal += cheapest[bb.priority];
+  }
+
+  int pruned = 0;
+  for (const auto &bb : bayState.blockingBlock)
+  {
+    const int others = minimumTotal - cheapest[bb.priority];
+    for (auto &seq : sequence[bb.priority])
+    {
+      if (seq.type == Inactive)
+      {
+        continue;
+      }
+      if (seq.length() + others > bound)
+      {
+        quboPruned[bb.priority][seq.no] = 1;
+        ++pruned;
+      }
+    }
+  }
+
+  // Second pass: a sequence dominated by another of the same block cannot be
+  // needed either. If sq1 costs no more than sq2, conflicts with nothing sq2
+  // does not conflict with, and passes through no stack-period sq2 does not,
+  // then swapping sq2 for sq1 keeps every constraint satisfied at no extra
+  // cost -- so an optimal selection using sq2 has an equally good twin using
+  // sq1, and sq2 can go.
+  int dominated = 0;
+  for (const auto &bb : bayState.blockingBlock)
+  {
+    const int b = bb.priority;
+    std::vector<std::vector<std::pair<int, int>>> buckets(sequence[b].size());
+    for (const auto &seq : sequence[b])
+    {
+      if (qubo_active(seq))
+      {
+        buckets[static_cast<std::size_t>(seq.no)] = occupied_buckets(seq);
+      }
+    }
+
+    for (std::size_t i = 0; i < sequence[b].size(); ++i)
+    {
+      for (std::size_t j = i + 1; j < sequence[b].size(); ++j)
+      {
+        if (!qubo_active(sequence[b][i]) || !qubo_active(sequence[b][j]))
+        {
+          continue;
+        }
+        const Sequence &a = sequence[b][i];
+        const Sequence &c = sequence[b][j];
+        // the cheaper one is the candidate dominator; equal costs keep the first
+        const bool aFirst = (a.length() <= c.length());
+        const Sequence &keeper = aFirst ? a : c;
+        const Sequence &victim = aFirst ? c : a;
+        const std::vector<std::pair<int, int>> &keeperBuckets =
+            buckets[static_cast<std::size_t>(keeper.no)];
+        const std::vector<std::pair<int, int>> &victimBuckets =
+            buckets[static_cast<std::size_t>(victim.no)];
+
+        if (!std::includes(victimBuckets.begin(), victimBuckets.end(),
+                           keeperBuckets.begin(), keeperBuckets.end()))
+        {
+          continue;
+        }
+
+        bool dominates = true;
+        for (const auto &bb2 : bayState.blockingBlock)
+        {
+          const int b2 = bb2.priority;
+          if (b2 == b)
+          {
+            continue;
+          }
+          for (std::size_t sq2 = 0; dominates && sq2 < sequence[b2].size(); ++sq2)
+          {
+            if (!qubo_active(sequence[b2][sq2]))
+            {
+              continue;
+            }
+            if (conflicts_with(keeper, b2, static_cast<int>(sq2))
+                && !conflicts_with(victim, b2, static_cast<int>(sq2)))
+            {
+              dominates = false;
+            }
+          }
+          if (!dominates)
+          {
+            break;
+          }
+        }
+
+        if (dominates)
+        {
+          quboPruned[b][victim.no] = 1;
+          ++dominated;
+        }
+      }
+    }
+  }
+
+  if (verbose && (pruned > 0 || dominated > 0))
+  {
+    std::cout << "QUBO dropped " << pruned << " sequence variable(s) at cost bound "
+              << bound << " and " << dominated << " dominated one(s)" << std::endl;
+  }
+}
+
+// Is this sequence in conflict with sequence `otherSequence` of `otherBlock`?
+// The table is stored once per unordered block pair, under the higher priority.
+bool QUBOModel::conflicts_with(const Sequence &seq, const int otherBlock,
+                               const int otherSequence) const
+{
+  const int b = seq.block.priority;
+  const int hi = std::max(b, otherBlock);
+  const int lo = std::min(b, otherBlock);
+  const std::size_t row = static_cast<std::size_t>(b == hi ? seq.no : otherSequence);
+  const std::size_t col = static_cast<std::size_t>(b == hi ? otherSequence : seq.no);
+
+  if (conflict[hi][lo].size() <= row || conflict[hi][lo][row].size() <= col)
+  {
+    return false;
+  }
+  return conflict[hi][lo][row][col];
+}
+
+// The (period, stack) buckets a sequence occupies: the capacity constraints it
+// takes part in. Sorted, so set inclusion can be tested directly.
+std::vector<std::pair<int, int>> QUBOModel::occupied_buckets(const Sequence &seq) const
+{
+  std::vector<std::pair<int, int>> buckets;
+  auto itr = seq.relocations.begin();
+  int t = itr->period;
+  for (++itr; itr != seq.relocations.end(); ++itr)
+  {
+    for (; t < itr->period && t < bayState.numberOfBlocks - bayState.numberOfTiers - 1;
+         ++t)
+    {
+      buckets.push_back(std::make_pair(t, itr->src));
+    }
+  }
+  std::sort(buckets.begin(), buckets.end());
+  buckets.erase(std::unique(buckets.begin(), buckets.end()), buckets.end());
+  return buckets;
+}
+
+// One product term per conflicting pair of selected sequences: the pair
+// constraint x1 + x2 <= 1 needs no slack, x1*x2 is already its exact penalty.
+// Collected from the conflict table every iteration so that inactive and pruned
+// sequences contribute nothing, and merged with the capacity pairs so a pair
+// both families forbid carries one term rather than two.
+void QUBOModel::collect_conflict_pairs(ForbiddenPairs &pairs) const
+{
+  for (const auto &bb1 : bayState.blockingBlock)
+  {
+    const int b1 = bb1.priority;
+    for (const auto &bb2 : bayState.blockingBlock)
+    {
+      const int b2 = bb2.priority;
+      if (b2 >= b1 || conflict[b1][b2].empty())
+      {
+        continue;
+      }
+      for (std::size_t sq1 = 0;
+           sq1 < conflict[b1][b2].size() && sq1 < sequence[b1].size(); ++sq1)
+      {
+        if (!qubo_active(sequence[b1][sq1]))
+        {
+          continue;
+        }
+        for (std::size_t sq2 = 0;
+             sq2 < conflict[b1][b2][sq1].size() && sq2 < sequence[b2].size(); ++sq2)
+        {
+          if (!conflict[b1][b2][sq1][sq2] || !qubo_active(sequence[b2][sq2]))
+          {
+            continue;
+          }
+          const GRBVar &v1 = *(sequence[b1][sq1].qvariable);
+          const GRBVar &v2 = *(sequence[b2][sq2].qvariable);
+          const int i = std::min(v1.index(), v2.index());
+          const int j = std::max(v1.index(), v2.index());
+          pairs[std::make_pair(i, j)] = std::make_pair(v1, v2);
+        }
+      }
+    }
+  }
+}
+
+// Builds the QUBO penalty for the capacity constraints (the relocations a stack
+// receives during a period must fit in its free tiers). Every bucket is checked
+// against the cheapest encoding that still forbids exactly the infeasible
+// assignments:
+//
+//   * a bucket whose sequences come from at most `capacity` distinct blocking
+//     blocks cannot be violated at all -- the one-hot constraints already cap
+//     the sum -- so it is dropped, slack variables and all;
+//   * a bucket implied by another one (its variables are a subset of the other's
+//     and its capacity is no smaller) is dropped for the same reason;
+//   * capacity 0 means every variable in the bucket must be 0, which is a linear
+//     penalty and needs neither slack variables nor couplings;
+//   * capacity 1 is "at most one of them", whose exact penalty is a product per
+//     pair -- again no slack variables. Those pairs join the conflict pairs, so
+//     a pair both families forbid is paid for once, and pairs from one blocking
+//     block are skipped because the one-hot penalty already covers them;
+//   * only capacity >= 2 falls back to slack variables and a squared penalty,
+//     and identical buckets are encoded once.
+//
+// The slack variables are created per (period, stack) bucket and reused across
+// iterations so repeated rebuilds do not leak variables into qmodel.
+GRBQuadExpr QUBOModel::build_capacity_penalty(const double penalty,
+                                              ForbiddenPairs &pairs)
+{
+  struct Entry
+  {
+    GRBVar var;
+    int block;
+  };
+  struct Bucket
+  {
+    int period;
+    int stack;
+    int capacity;
+    std::vector<Entry> members;
+    std::vector<int> signature;      // sorted, unique variable indices
+  };
+
+  std::map<std::pair<int, int>, std::vector<Entry>> collected;
 
   for (const auto &bb : bayState.blockingBlock)
   {
     for (const auto &seq : sequence[bb.priority])
     {
-      if (seq.type == Inactive)
+      if (!qubo_active(seq))
       {
         continue;
       }
@@ -1431,89 +1619,225 @@ GRBQuadExpr QUBOModel::build_capacity_penalty()
         for (; t < itr->period && t < bayState.numberOfBlocks - bayState.numberOfTiers - 1;
              ++t)
         {
-          bucket[std::make_pair(t, itr->src)] += *(seq.qvariable);
+          collected[std::make_pair(t, itr->src)]
+              .push_back(Entry{*(seq.qvariable), bb.priority});
         }
+      }
+    }
+  }
+
+  std::vector<Bucket> buckets;
+  for (auto &entry : collected)
+  {
+    Bucket bucket;
+    bucket.period = entry.first.first;
+    bucket.stack = entry.first.second;
+    bucket.capacity = bayState.numberOfTiers
+                      - bayState[bucket.period].stack[bucket.stack].height;
+    bucket.members = entry.second;
+
+    std::set<int> blocks;
+    for (const auto &member : bucket.members)
+    {
+      blocks.insert(member.block);
+      bucket.signature.push_back(member.var.index());
+    }
+    // one selection per blocking block: a bucket that cannot reach its capacity
+    // is already enforced by the one-hot penalties
+    if (static_cast<int>(blocks.size()) <= bucket.capacity)
+    {
+      continue;
+    }
+    std::sort(bucket.signature.begin(), bucket.signature.end());
+    bucket.signature.erase(std::unique(bucket.signature.begin(), bucket.signature.end()),
+                           bucket.signature.end());
+    buckets.push_back(bucket);
+  }
+
+  // A bucket is redundant when another kept bucket covers its variables with no
+  // more room: sum over the subset <= sum over the superset <= that capacity.
+  // Identical buckets would otherwise drop each other, so among equals only the
+  // first survives.
+  std::vector<bool> keep(buckets.size(), true);
+  for (std::size_t a = 0; a < buckets.size(); ++a)
+  {
+    for (std::size_t b = 0; keep[a] && b < buckets.size(); ++b)
+    {
+      if (a == b || !keep[b] || buckets[b].capacity > buckets[a].capacity)
+      {
+        continue;
+      }
+      const bool identical = (buckets[a].signature == buckets[b].signature
+                              && buckets[a].capacity == buckets[b].capacity);
+      if (identical && b > a)
+      {
+        continue;                    // keep the first of a set of equals
+      }
+      if (std::includes(buckets[b].signature.begin(), buckets[b].signature.end(),
+                        buckets[a].signature.begin(), buckets[a].signature.end()))
+      {
+        keep[a] = false;
       }
     }
   }
 
   GRBQuadExpr result(0.0);
 
-  for (auto &entry : bucket)
+  for (std::size_t index = 0; index < buckets.size(); ++index)
   {
-    const int period = entry.first.first;
-    const int stack = entry.first.second;
-    const int capacity = bayState.numberOfTiers - bayState[period].stack[stack].height;
+    if (!keep[index])
+    {
+      continue;
+    }
+    const Bucket &bucket = buckets[index];
+    const std::vector<Entry> &members = bucket.members;
 
-    const std::vector<int> weights = slack_weights(capacity);
+    if (bucket.capacity <= 0)
+    {
+      for (const auto &member : members)
+      {
+        result.addTerm(penalty, member.var);
+      }
+      continue;
+    }
 
-    if (capacitySlackVars[period][stack].empty() && !weights.empty())
+    if (bucket.capacity == 1)
+    {
+      for (std::size_t i = 0; i < members.size(); ++i)
+      {
+        for (std::size_t j = i + 1; j < members.size(); ++j)
+        {
+          if (members[i].block == members[j].block)
+          {
+            continue;                // the one-hot penalty already forbids this
+          }
+          const int a = std::min(members[i].var.index(), members[j].var.index());
+          const int b = std::max(members[i].var.index(), members[j].var.index());
+          pairs[std::make_pair(a, b)] = std::make_pair(members[i].var, members[j].var);
+        }
+      }
+      continue;
+    }
+
+    const std::vector<int> weights = slack_weights(bucket.capacity);
+
+    if (capacitySlackVars[bucket.period][bucket.stack].empty() && !weights.empty())
     {
       for (std::size_t k = 0; k < weights.size(); ++k)
       {
         std::ostringstream ss;
-        ss << "s(" << period << "," << stack << "," << k << ")";
-        capacitySlackVars[period][stack]
+        ss << "s(" << bucket.period << "," << bucket.stack << "," << k << ")";
+        capacitySlackVars[bucket.period][bucket.stack]
             .push_back(qmodel->addVar(0.0, 1.0, 0.0, GRB_BINARY, ss.str()));
       }
+      qmodel->update();
     }
 
-    GRBLinExpr expr = entry.second;
-    for (std::size_t k = 0; k < capacitySlackVars[period][stack].size(); ++k)
+    GRBLinExpr expr(0.0);
+    for (const auto &member : members)
     {
-      expr += static_cast<double>(weights[k]) * capacitySlackVars[period][stack][k];
+      expr += member.var;
     }
-    expr -= static_cast<double>(capacity);
+    for (std::size_t k = 0;
+         k < capacitySlackVars[bucket.period][bucket.stack].size() && k < weights.size(); ++k)
+    {
+      expr += static_cast<double>(weights[k])
+              * capacitySlackVars[bucket.period][bucket.stack][k];
+    }
+    expr -= static_cast<double>(bucket.capacity);
 
-    result += squared_penalty(expr);
+    result += penalty * squared_penalty(expr);
   }
 
   return result;
 }
 
-// Assembles the full QUBO objective (true objective + penalty * (assignment
-// + conflict + capacity constraints)) and installs it on qmodel. This is
-// the single place the per-iteration QUBO is built; it replaces what used
-// to be two independently-maintained, copy-pasted blocks inside solve().
-void QUBOModel::update_qubo_objective(const double penalty, const bool verbose)
+// Assembles the full QUBO objective and installs it on qmodel.
+//
+// Energy = sum of the costs of the selected sequences
+//        + M_b * (1 - sum of block b's sequences)^2      for every block b
+//        + M   * (conflict and capacity penalties)
+//
+// The multipliers are the smallest ones that still leave every infeasible
+// assignment strictly worse than the model's optimum. Write S for the sum over
+// blocks of the cheapest sequence cost (a lower bound on the optimum) and U for
+// an upper bound on it. An assignment that leaves a set K of blocks unassigned
+// and violates v other constraints has energy at least
+//
+//     (S - sum_{b in K} min_b) + sum_{b in K} M_b + v * M,
+//
+// so M = U - S + 1 and M_b = U - S + min_b + 1 make that at least U + 1 > U
+// whenever K or v is non-empty. What matters is the objective *spread* U - S,
+// not the size of a single cost: a multiplier taken from the largest sequence
+// cost is unrelated to the quantity it has to dominate, so it is both larger
+// than needed on most instances and not sufficient in general.
+void QUBOModel::update_qubo_objective(const bool verbose)
 {
-  GRBQuadExpr qObjExpr(0.0);
+  qmodel->update();
+  prune_qubo_variables(verbose);
+
+  int minimumTotal = 0;
+  std::vector<int> cheapest(bayState.numberOfBlocks, 0);
   for (const auto &bb : bayState.blockingBlock)
   {
-    qObjExpr += qObjective[bb.priority];
+    int best = -1;
+    for (const auto &seq : sequence[bb.priority])
+    {
+      if (qubo_active(seq) && (best < 0 || seq.length() < best))
+      {
+        best = seq.length();
+      }
+    }
+    cheapest[bb.priority] = std::max(best, 0);
+    minimumTotal += cheapest[bb.priority];
   }
 
+  const double spread = std::max(qubo_upper_bound() - minimumTotal, 0);
+  const double penalty = spread + 1.0;
+
+  GRBQuadExpr qObjExpr(0.0);
   GRBQuadExpr qAssignExpr(0.0);
   for (const auto &bb : bayState.blockingBlock)
   {
-    qAssignExpr += squared_penalty(qAssignmentConstraint[bb.priority]);
+    GRBLinExpr assignment(1.0);
+    for (const auto &seq : sequence[bb.priority])
+    {
+      if (!qubo_active(seq))
+      {
+        continue;
+      }
+      qObjExpr += static_cast<double>(seq.length()) * (*(seq.qvariable));
+      assignment -= *(seq.qvariable);
+    }
+    qAssignExpr += (spread + cheapest[bb.priority] + 1.0) * squared_penalty(assignment);
   }
 
-  GRBQuadExpr qConflictExpr(0.0);
-  for (const auto &bb1 : bayState.blockingBlock)
+  ForbiddenPairs pairs;
+  collect_conflict_pairs(pairs);
+  GRBQuadExpr qPairExpr = build_capacity_penalty(penalty, pairs);
+  for (const auto &pair : pairs)
   {
-    const int b1 = bb1.priority;
-    for (const auto &bb2 : bayState.blockingBlock)
+    qPairExpr.addTerm(penalty, pair.second.first, pair.second.second);
+  }
+
+  GRBQuadExpr qTotalObjExpr(0.0);
+  qTotalObjExpr += qObjExpr + qAssignExpr + qPairExpr;
+  quboOffset = qTotalObjExpr.getLinExpr().getConstant();
+  qmodel->setObjective(qTotalObjExpr);
+  qmodel->update();
+
+  // sequences ruled out by cost take no part in the QUBO at all
+  for (const auto &bb : bayState.blockingBlock)
+  {
+    for (const auto &seq : sequence[bb.priority])
     {
-      const int b2 = bb2.priority;
-      if ((b2 < b1) && !qConflictConstraint[b1][b2].empty())
+      if (seq.type != Inactive)
       {
-        for (const auto &qcc : qConflictConstraint[b1][b2])
-        {
-          if (qcc != nullptr)
-          {
-            qConflictExpr += *qcc;
-          }
-        }
+        seq.qvariable->set(GRB_DoubleAttr_UB,
+                           quboPruned[bb.priority][seq.no] ? 0.0 : 1.0);
       }
     }
   }
-
-  GRBQuadExpr qCapacityExpr = build_capacity_penalty();
-
-  GRBQuadExpr qTotalObjExpr(0.0);
-  qTotalObjExpr += (penalty + 1) * (qConflictExpr + qAssignExpr + qCapacityExpr) + qObjExpr;
-  qmodel->setObjective(qTotalObjExpr);
   qmodel->update();
 
   if (verbose)
@@ -1525,13 +1849,34 @@ void QUBOModel::update_qubo_objective(const double penalty, const bool verbose)
       std::cout << qvars[i].get(GRB_StringAttr_VarName) << "\t";
     }
     std::cout << std::endl;
-    std::cout << "QUBO penalty: " << penalty << std::endl;
+    std::cout << "QUBO penalty: " << penalty << " (constraints), "
+              << "assignment " << (spread + 1.0) << "..."
+              << (spread + 1.0 + *std::max_element(cheapest.begin(), cheapest.end()))
+              << std::endl;
 
     std::cout << "QUBO objective: "
               << qmodel->getObjective().size() + qmodel->getObjective().getLinExpr().size()
               << " terms" << std::endl;
     std::cout << qmodel->getObjective() << std::endl;
   }
+}
+
+// Reports the QUBO's own optimum next to the IP's, so the two can be compared:
+// they must agree whenever the lower-bound cut is not binding. This is the
+// standing check that the penalty weights are still large enough.
+void QUBOModel::report_qubo(const char *phase) const
+{
+  if (qmodel->get(GRB_IntAttr_Status) != GRB_OPTIMAL)
+  {
+    std::cerr << "qubo_" << phase << "=nonoptimal" << std::endl;
+    return;
+  }
+  std::cerr << "qubo_" << phase << "_objective=" << qmodel->get(GRB_DoubleAttr_ObjVal);
+  if (model->get(GRB_IntAttr_Status) == GRB_OPTIMAL)
+  {
+    std::cerr << " ip_objective=" << model->get(GRB_DoubleAttr_ObjVal);
+  }
+  std::cerr << " qubo_vars=" << qmodel->get(GRB_IntAttr_NumVars) << std::endl;
 }
 
 void QUBOModel::print_ip_debug() const
@@ -1608,12 +1953,7 @@ void QUBOModel::capture_qubo()
   const GRBQuadExpr obj = qmodel->getObjective();
   const GRBLinExpr lin = obj.getLinExpr();
 
-  if (lin.getConstant() != 0.0)
-  {
-    std::cerr << "warning: QUBO objective has a nonzero constant ("
-              << lin.getConstant() << ") that is dropped by the QUBO format"
-              << std::endl;
-  }
+  quboOffset = lin.getConstant();
 
   for (unsigned int i = 0; i < lin.size(); ++i)
   {
@@ -1635,6 +1975,71 @@ void QUBOModel::capture_qubo()
     {
       quboCoefficients[std::make_pair(std::min(i1, i2), std::max(i1, i2))] += c;
     }
+  }
+
+  // Drop every column that carries no coefficient at all -- a sequence ruled out
+  // by cost, or a slack variable whose bucket turned out to be redundant. Such a
+  // column cannot change the energy, so keeping it would only widen the model.
+  // What is left is renumbered 0..n-1 so the exported file is compact.
+  std::vector<int> remap(quboVariableNames.size(), -1);
+  int kept = 0;
+  for (const auto &entry : quboCoefficients)
+  {
+    if (entry.second == 0.0)
+    {
+      continue;
+    }
+    for (const int idx : {entry.first.first, entry.first.second})
+    {
+      if (idx >= 0 && idx < static_cast<int>(remap.size()) && remap[idx] < 0)
+      {
+        remap[idx] = 0;
+      }
+    }
+  }
+  for (std::size_t i = 0; i < remap.size(); ++i)
+  {
+    if (remap[i] == 0)
+    {
+      remap[i] = kept++;
+    }
+  }
+
+  if (kept < static_cast<int>(quboVariableNames.size()))
+  {
+    std::vector<std::string> names(static_cast<std::size_t>(kept));
+    std::vector<int> priority(static_cast<std::size_t>(kept), -1);
+    std::vector<int> cost(static_cast<std::size_t>(kept), 0);
+    std::vector<std::vector<Relocation>> relocations(static_cast<std::size_t>(kept));
+    for (std::size_t i = 0; i < remap.size(); ++i)
+    {
+      if (remap[i] < 0)
+      {
+        continue;
+      }
+      const std::size_t to = static_cast<std::size_t>(remap[i]);
+      names[to] = quboVariableNames[i];
+      priority[to] = quboVariablePriority[i];
+      cost[to] = quboVariableCost[i];
+      relocations[to] = quboVariableRelocations[i];
+    }
+    quboVariableNames.swap(names);
+    quboVariablePriority.swap(priority);
+    quboVariableCost.swap(cost);
+    quboVariableRelocations.swap(relocations);
+
+    std::map<std::pair<int, int>, double> compacted;
+    for (const auto &entry : quboCoefficients)
+    {
+      if (entry.second == 0.0)
+      {
+        continue;
+      }
+      const int i = remap[static_cast<std::size_t>(entry.first.first)];
+      const int j = remap[static_cast<std::size_t>(entry.first.second)];
+      compacted[std::make_pair(std::min(i, j), std::max(i, j))] += entry.second;
+    }
+    quboCoefficients.swap(compacted);
   }
 
   quboCaptured = true;
@@ -1735,6 +2140,9 @@ bool QUBOModel::export_qubo(const std::string &filename) const
   ofs << "# QUBO exported from RBRP QUBOModel (Tanaka-Voss restricted BRP)\n";
   ofs << "# load with: dimod.BinaryQuadraticModel.from_qubo(Q) -- see load_qubo.py\n";
   ofs << "# variables: " << quboVariableNames.size() << "\n";
+  // Energy(file) + offset = the model's objective value, the penalty constants
+  // being the part a bare coefficient list cannot carry.
+  ofs << "# offset " << quboOffset << "\n";
   for (std::size_t i = 0; i < quboVariableNames.size(); ++i)
   {
     ofs << "# var " << i << " " << quboVariableNames[i] << "\n";

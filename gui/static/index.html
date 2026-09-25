@@ -1,0 +1,274 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Restricted BRP Solver</title>
+<link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+<header class="topbar">
+  <div class="brand">
+    <span class="brand-mark"></span>
+    <div>
+      <h1>Restricted BRP Solver</h1>
+      <p class="brand-sub">Block relocation problem &middot; exact IP model solved with Gurobi</p>
+    </div>
+  </div>
+  <div class="topbar-actions">
+    <code id="command-preview" class="command command-inline"></code>
+    <span id="solver-status" class="pill pill-muted">checking solver&hellip;</span>
+    <button id="run-button" class="btn btn-primary" type="button">Run solver</button>
+  </div>
+</header>
+
+<main class="layout">
+  <!-- ------------------------------------------------------------ sidebar -->
+  <aside class="panel sidebar">
+    <section class="block">
+      <h2>Test case</h2>
+      <div class="seg" id="mode-switch">
+        <button class="seg-btn is-active" type="button" data-mode="benchmark">Benchmark file</button>
+        <button class="seg-btn" type="button" data-mode="custom">Design your own</button>
+      </div>
+      <div id="benchmark-picker">
+        <p class="hint">Instances from <code>data/</code>. The file name encodes
+          <em>tiers&ndash;stacks&ndash;index</em>, e.g. <code>data03-06-29</code> =
+          3 tiers, 6 stacks. Instances you design and save appear as
+          <code>custom/&hellip;</code>.</p>
+        <input id="instance-filter" class="input" type="search" placeholder="Filter, e.g. 05-08 or custom">
+        <select id="instance-select" class="input" size="10"></select>
+      </div>
+      <p id="custom-hint" class="hint hidden">Editing your own bay in the
+        <strong>Instance designer</strong> on the right. It runs like any other test
+        case, and saving puts it in <code>data/custom/</code>.</p>
+      <dl id="instance-facts" class="facts"></dl>
+    </section>
+
+    <section class="block">
+      <h2>Parameters</h2>
+      <p class="hint">Blank means "don't pass the flag" &mdash; the solver default applies.</p>
+
+      <div class="field">
+        <label for="p-empty-tiers">Empty tiers <code>-E</code></label>
+        <input id="p-empty-tiers" class="input" type="number" min="0" step="1" value="2" placeholder="off">
+        <p class="help">Height limit = tiers in the file + this many extra tiers.
+          The usual CV-benchmark setting is <strong>2</strong>; ZQLZ instances use <strong>0</strong>.
+          Blank = no height limit (stacks may grow to the number of blocks).</p>
+      </div>
+
+      <div class="field">
+        <label for="p-max-height">Maximum tiers <code>-T</code></label>
+        <input id="p-max-height" class="input" type="number" min="1" step="1" placeholder="off">
+        <p class="help">Absolute cap on stack height. It never lowers the limit set by
+          <code>-E</code> or by the tallest stack in the file &mdash; it only raises it.</p>
+      </div>
+
+      <div class="field">
+        <label for="p-time-limit">Time limit <code>-t</code> <span class="unit">seconds</span></label>
+        <input id="p-time-limit" class="input" type="number" min="0" step="1" placeholder="none">
+        <p class="help">Wall-clock budget for the optimisation. On a timeout you get the best
+          bounds found so far instead of a proven optimum.</p>
+      </div>
+
+      <div class="field">
+        <label for="p-threads">Threads <code>-m</code></label>
+        <input id="p-threads" class="input" type="number" min="0" step="1" placeholder="all cores">
+        <p class="help">Gurobi threads. 0 or blank lets Gurobi use every core.</p>
+      </div>
+
+      <div class="field">
+        <label for="p-threshold">Sequence-expansion threshold <code>-s</code></label>
+        <input id="p-threshold" class="input" type="number" min="0" step="1" placeholder="2">
+        <p class="help">How aggressively relocation sequences are expanded into IP variables.
+          Higher = a bigger, tighter model; lower = a smaller model and more iterations.</p>
+      </div>
+
+      <div class="field checks">
+        <label class="check"><input id="p-disable-greedy" type="checkbox">
+          <span>Disable greedy upper bound <code>-g</code></span></label>
+        <p class="help">Skips the fast heuristic that seeds an initial upper bound.</p>
+        <label class="check"><input id="p-disable-ub" type="checkbox">
+          <span>Disable upper bounding <code>-u</code></span></label>
+        <p class="help">Solves lower bounds only, without the upper-bounding loop.</p>
+        <label class="check"><input id="p-verbose" type="checkbox">
+          <span>Verbose solver log <code>-v 1</code></span></label>
+        <p class="help">Echoes the instance and progress details into the log tab.</p>
+        <label class="check"><input id="p-export-qubo" type="checkbox">
+          <span>Also export QUBO <code>-Q problem.qubo</code></span></label>
+        <p class="help">Writes the QUBO formulation for the quantum solvers. Classical results are unaffected.</p>
+      </div>
+    </section>
+
+    <section class="block">
+      <h2>QUBO model</h2>
+      <p class="hint">Inspect a <code>.qubo</code> file exported with <code>-Q</code>:
+        the matrix, what each column stands for, and what a selection of columns costs.</p>
+      <select id="qubo-file" class="input"></select>
+      <button id="qubo-load" class="btn" type="button">Load QUBO</button>
+    </section>
+
+    <section class="block">
+      <h2>Settings</h2>
+      <div class="field">
+        <label for="theme-select">Appearance</label>
+        <select id="theme-select" class="input">
+          <option value="system">Follow system</option>
+          <option value="light">Light</option>
+          <option value="dark">Dark</option>
+        </select>
+        <p class="help">Light or dark background for the whole GUI. The bay colours are
+          picked per theme, not flipped, so the shading stays readable either way.</p>
+      </div>
+    </section>
+  </aside>
+
+  <!-- ------------------------------------------------------------- results -->
+  <section class="results">
+    <div id="empty-state" class="panel empty-state">
+      <h2>Pick a test case and run the solver</h2>
+      <p>The bay below is the instance as loaded. Blocks are shaded by retrieval order:
+        the darkest block is the one that must leave first.</p>
+      <div id="preview-bay" class="bay-host"></div>
+    </div>
+
+    <div id="designer" class="panel hidden">
+      <div class="panel-head">
+        <h2>Instance designer</h2>
+        <div class="legend"><span>Type a priority in each slot — 1 leaves the bay first.
+          Empty slots are free space, and blocks settle to the bottom of their stack.</span></div>
+      </div>
+
+      <div class="designer-controls">
+        <label class="mini">Stacks <input id="d-stacks" class="input input-inline" type="number" min="1" max="20" value="4"></label>
+        <label class="mini">Tiers <input id="d-tiers" class="input input-inline" type="number" min="1" max="20" value="4"></label>
+        <button id="d-random" class="btn btn-ghost" type="button" title="Fill every slot with a random order">Random</button>
+        <button id="d-renumber" class="btn btn-ghost" type="button" title="Renumber the blocks 1..N keeping their order">Renumber</button>
+        <button id="d-copy" class="btn btn-ghost" type="button" title="Start from the instance selected in the sidebar">Copy selected file</button>
+        <button id="d-clear" class="btn btn-ghost" type="button">Clear</button>
+      </div>
+
+      <div id="designer-grid" class="designer-grid"></div>
+      <p id="designer-status" class="designer-status"></p>
+
+      <div class="designer-save">
+        <input id="d-name" class="input" type="text" placeholder="my-instance" maxlength="60">
+        <button id="d-save" class="btn" type="button">Save to data/custom/</button>
+        <span id="d-save-note" class="hint"></span>
+      </div>
+    </div>
+
+    <div id="qubo-view" class="panel hidden">
+      <div class="panel-head">
+        <h2>QUBO model <code id="qubo-file-name"></code></h2>
+        <span id="qubo-match" class="pill pill-muted"></span>
+      </div>
+      <div id="qubo-stats" class="stat-row stat-row-tight"></div>
+
+      <div class="qubo-matrix">
+        <canvas id="qubo-canvas"></canvas>
+        <div id="qubo-tip" class="qubo-tip hidden"></div>
+      </div>
+      <div class="legend" id="qubo-legend"></div>
+
+      <div id="qubo-interpretation" class="prose"></div>
+
+      <div class="qubo-actions">
+        <button id="qubo-search" class="btn btn-primary" type="button">Find the best replayable selection</button>
+        <button id="qubo-cheapest" class="btn btn-ghost" type="button">Cheapest column per block</button>
+        <input id="qubo-selection" class="input" type="text"
+               placeholder="x(5,0), x(8,2)&hellip; or a bitstring from a sampler">
+        <button id="qubo-eval" class="btn" type="button">Evaluate</button>
+      </div>
+      <div id="qubo-eval-result" class="prose"></div>
+
+      <details class="qubo-columns">
+        <summary>All <span id="qubo-column-count"></span> columns</summary>
+        <div class="table-wrap">
+          <table id="qubo-vars" class="table">
+            <thead><tr><th>#</th><th>Name</th><th>Kind</th><th>Block</th>
+              <th>Cost</th><th>Linear</th><th>Moves</th></tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </details>
+    </div>
+
+    <div id="result-view" class="hidden">
+      <div id="stat-row" class="stat-row"></div>
+
+      <div class="panel">
+        <div class="panel-head">
+          <h2>Move plan</h2>
+          <div class="legend" id="bay-legend"></div>
+        </div>
+        <div id="step-caption" class="caption"></div>
+        <div id="result-bay" class="bay-host"></div>
+        <div class="player">
+          <button id="btn-first" class="btn btn-ghost" type="button" title="First step">&#124;&laquo;</button>
+          <button id="btn-prev" class="btn btn-ghost" type="button" title="Previous step (left arrow)">&laquo;</button>
+          <button id="btn-play" class="btn btn-primary" type="button" title="Play / pause (space)">Play</button>
+          <button id="btn-next" class="btn btn-ghost" type="button" title="Next step (right arrow)">&raquo;</button>
+          <button id="btn-last" class="btn btn-ghost" type="button" title="Last step">&raquo;&#124;</button>
+          <input id="step-slider" class="slider" type="range" min="0" max="0" value="0">
+          <span id="step-counter" class="counter"></span>
+          <label class="speed">Speed
+            <select id="speed-select" class="input input-inline">
+              <option value="1400">0.5&times;</option>
+              <option value="700" selected>1&times;</option>
+              <option value="350">2&times;</option>
+              <option value="150">4&times;</option>
+            </select>
+          </label>
+        </div>
+      </div>
+
+      <div class="panel-grid">
+        <div class="panel">
+          <div class="panel-head"><h2>Relocations</h2>
+            <span class="hint" id="reloc-summary"></span></div>
+          <div class="table-wrap">
+            <table id="reloc-table" class="table">
+              <thead><tr><th>#</th><th>Block</th><th>From</th><th>To</th><th>Step</th></tr></thead>
+              <tbody></tbody>
+            </table>
+          </div>
+        </div>
+        <div class="panel">
+          <div class="panel-head"><h2>Interpretation</h2></div>
+          <div id="interpretation" class="prose"></div>
+        </div>
+      </div>
+
+      <div class="panel" id="solver-output-panel">
+        <div class="panel-head">
+          <h2>Solver output</h2>
+          <div class="tabs">
+            <button class="tab is-active" data-tab="summary" type="button">Summary</button>
+            <button class="tab" data-tab="stderr" type="button">stderr</button>
+            <button class="tab" data-tab="stdout" type="button">stdout</button>
+          </div>
+        </div>
+        <div id="tab-summary" class="tab-body"></div>
+        <pre id="tab-stderr" class="tab-body log hidden"></pre>
+        <pre id="tab-stdout" class="tab-body log hidden"></pre>
+      </div>
+    </div>
+
+    <div id="busy" class="panel busy hidden">
+      <div class="spinner"></div>
+      <div>
+        <strong id="busy-title">Solving&hellip;</strong>
+        <p id="busy-note" class="hint"></p>
+      </div>
+      <button id="busy-stop" class="btn btn-danger" type="button">Stop solver</button>
+    </div>
+
+    <div id="error-box" class="panel error hidden"></div>
+  </section>
+</main>
+
+<script src="/static/app.js"></script>
+<script src="/static/qubo.js"></script>
+</body>
+</html>

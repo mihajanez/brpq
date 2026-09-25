@@ -53,13 +53,12 @@ public:
       : bayState(instance), sequence(instance.numberOfBlocks),
         conflict(instance.numberOfBlocks),
         lastNumberOfSequences(instance.numberOfBlocks, 0),
-        qObjective(instance.numberOfBlocks),
         assignmentConstraint(instance.numberOfBlocks),
-        qAssignmentConstraint(instance.numberOfBlocks),
         capacityConstraint(instance.numberOfBlocks),
         capacitySlackVars(instance.numberOfBlocks),
         conflictConstraint(instance.numberOfBlocks),
-        qConflictConstraint(instance.numberOfBlocks),
+        quboPruned(instance.numberOfBlocks),
+        quboOffset(0.0),
         quboCaptured(false),
         initialNumberOfVariables(0), initialNumberOfConstraints(0),
         finalNumberOfVariables(0), finalNumberOfConstraints(0),
@@ -166,22 +165,43 @@ private:
 
   static std::vector<int> slack_weights(const int capacity);
   GRBQuadExpr squared_penalty(const GRBLinExpr &expr) const;
-  GRBQuadExpr build_capacity_penalty();
-  void update_qubo_objective(const double penalty, const bool verbose);
+  bool qubo_active(const Sequence &seq) const
+  {
+    return seq.type != Inactive && !quboPruned[seq.block.priority][seq.no];
+  }
+  int qubo_upper_bound() const;
+  void prune_qubo_variables(const bool verbose);
+  bool conflicts_with(const Sequence &seq, const int otherBlock,
+                      const int otherSequence) const;
+  std::vector<std::pair<int, int>> occupied_buckets(const Sequence &seq) const;
+  // Pairs of sequence variables that must not both be selected, collected from
+  // the conflict constraints and from capacity buckets that hold at most one
+  // relocation. Keyed by qmodel variable index so a pair forbidden by both
+  // families is emitted once.
+  typedef std::map<std::pair<int, int>, std::pair<GRBVar, GRBVar>> ForbiddenPairs;
+  void collect_conflict_pairs(ForbiddenPairs &pairs) const;
+  GRBQuadExpr build_capacity_penalty(const double penalty, ForbiddenPairs &pairs);
+  void update_qubo_objective(const bool verbose);
   void print_ip_debug() const;
+  void report_qubo(const char *phase) const;
   void capture_qubo();
 
   BayState bayState;
   std::vector<std::vector<Sequence>> sequence;
   std::vector<std::vector<std::vector<std::vector<bool>>>> conflict;
   std::vector<int> lastNumberOfSequences;
-  std::vector<GRBLinExpr> qObjective;
   std::vector<GRBConstr> assignmentConstraint;
-  std::vector<GRBLinExpr> qAssignmentConstraint;
   std::vector<std::vector<GRBConstr *>> capacityConstraint;
   std::vector<std::vector<std::vector<GRBVar>>> capacitySlackVars;
   std::vector<std::vector<std::vector<GRBConstr *>>> conflictConstraint;
-  std::vector<std::vector<std::vector<GRBQuadExpr *>>> qConflictConstraint;
+  // Sequences excluded from the QUBO because their cost alone rules them out
+  // of any solution as good as the incumbent; quboPruned[b][sq] mirrors
+  // sequence[b][sq]. Recomputed from scratch every iteration.
+  std::vector<std::vector<char>> quboPruned;
+  // Constant term of the QUBO objective (penalty constants). The QUBO file
+  // format carries only linear/quadratic terms, so this is exported as a
+  // comment to let a reader recover absolute objective values.
+  double quboOffset;
   GRBModel *model;
   GRBModel *qmodel;
   GRBConstr lowerBoundConstraint;
