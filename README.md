@@ -47,3 +47,21 @@ own optimum next to the IP's, which must agree.
 
 starts a local web GUI (standard library only) for picking a test case, setting
 the parameters and stepping through the solution — see [gui/README.md](gui/README.md).
+
+## QAOA and re-scoring saved runs
+
+    .venv/bin/python qaoa_qubo.py problem.qubo -p 1 --save run.json
+    .venv/bin/python rescore.py problem.qubo --run run.json
+
+`qaoa_qubo.py` measures the logical circuit before transpiling, so the
+classical register has one bit per QUBO variable (bit *i* = variable *i*,
+Qiskit order: variable 0 is the rightmost character) whatever physical qubits
+the transpiler picks. `--save` writes the counts, angles, backend, job id and
+circuit size to JSON.
+
+`rescore.py` re-scores samples offline: mean energy, one-hot feasibility,
+optimum hits and, for small QUBOs, the uniform-random baseline. It also reads
+IBM Quantum jobs downloaded from the platform (`--ibm-job info.json
+result.json`), mapping the device's measured bits back to QUBO variables via
+the circuit's layout. Jobs submitted before the Ising sign fix (for example
+`damhugf8gn2s739lf5e0`) need `--old-sign`.
