@@ -3,7 +3,7 @@
 
 Pipeline:
     problem.qubo --[load_qubo]--> dimod BQM --[to_ising]--> Ising Hamiltonian
-    --[QAOAAnsatz, p layers]--> parameterized circuit
+    --[qaoa_ansatz, p layers]--> parameterized circuit
     --[classical optimizer + Estimator]--> tuned angles
     --[Sampler]--> bitstrings --[decode]--> selected sequence variables
 
@@ -70,12 +70,13 @@ Interpreting results (see also sample_qubo.py):
     ratio -- QAOA is not expected to beat it, only approach it.
 """
 import argparse
+import json
 import sys
 from itertools import product
 from types import SimpleNamespace
 
 import numpy as np
-from qiskit.circuit.library import QAOAAnsatz
+from qiskit.circuit.library import qaoa_ansatz
 from qiskit.primitives import StatevectorEstimator, StatevectorSampler
 from qiskit.quantum_info import SparsePauliOp
 from qiskit.transpiler.preset_passmanagers import generate_preset_pass_manager
@@ -98,7 +99,13 @@ def qubo_to_ising_operator(bqm):
                           "range, as produced by QUBOModel::export_qubo")
 
     h, J, offset = bqm.to_ising()
-    terms = [("Z", [i], float(bias)) for i, bias in h.items() if bias]
+    # dimod's spins are s = 2x - 1 (s = +1 <=> x = 1), but a Qiskit Z has
+    # eigenvalue +1 on |0>. Using h as-is would put x = 1 on a measured 0, so
+    # every decoded bitstring would be the complement of the intended one.
+    # With s = -Z instead, a measured bit is directly the QUBO variable
+    # (x = bit, as bitstring_to_sample, verify_solution.py and the GUI
+    # assume): the linear terms change sign, the ZZ terms don't.
+    terms = [("Z", [i], -float(bias)) for i, bias in h.items() if bias]
     terms += [("ZZ", list(pair), float(bias)) for pair, bias in J.items() if bias]
     cost_op = SparsePauliOp.from_sparse_list(terms, num_qubits=n)
     return cost_op, offset, n
@@ -107,6 +114,20 @@ def qubo_to_ising_operator(bqm):
 def bitstring_to_sample(bitstring, n):
     """Qiskit bitstrings are little-endian (qubit 0 = rightmost char)."""
     return {i: int(bitstring[-1 - i]) for i in range(n)}
+
+
+def one_hot_groups(names):
+    """{block: [variable indices]} for the sequence variables x(p,sq); the
+    assignment constraint requires exactly one selected variable per block."""
+    groups = {}
+    for i, name in names.items():
+        if name.startswith("x("):
+            groups.setdefault(block_of(name), []).append(i)
+    return groups
+
+
+def is_one_hot_feasible(sample, groups):
+    return all(sum(sample[i] for i in idx) == 1 for idx in groups.values())
 
 
 def brute_force_optimum(bqm, n, limit):
@@ -158,7 +179,7 @@ def build_backend(args):
 
     print("backend: ideal statevector simulator"
           + (f" ({args.shots} shots)" if args.shots else ", exact expectation"))
-    # QAOAAnsatz's cost/mixer layers are PauliEvolutionGate instructions; the
+    # qaoa_ansatz's cost/mixer layers are PauliEvolutionGate instructions; the
     # statevector primitives simulate a circuit gate-by-gate but need those
     # decomposed into standard basis gates first, or they fall back to
     # building the full 2^n x 2^n unitary (fine for a handful of qubits,
@@ -258,10 +279,18 @@ def main():
                              "ISA, print its stats and a lower-bound QPU "
                              "time estimate for the full run, then exit -- "
                              "no job is submitted and no optimizer runs")
-    parser.add_argument("--init-params", metavar="B1,G1,B2,G2,...",
+    parser.add_argument("--init-params", metavar="B1,...,Bp,G1,...,Gp",
                         help="comma-separated QAOA angles to start from "
-                             "(as printed at the end of a run), instead of "
-                             "the first random restart")
+                             "(as printed at the end of a run): all p "
+                             "mixer angles beta first, then all p cost "
+                             "angles gamma -- the ansatz's own parameter "
+                             "order. Used instead of the first random "
+                             "restart")
+    parser.add_argument("--save", metavar="JSON",
+                        help="write the run (backend, job id, angles, shots, "
+                             "per-bitstring counts over the QUBO variables, "
+                             "energies, feasibility) to this JSON file, for "
+                             "rescore.py and the benchmark harness")
     parser.add_argument("--no-optimize", action="store_true",
                         help="skip the classical optimization loop entirely "
                              "and sample directly with --init-params "
@@ -274,7 +303,7 @@ def main():
     cost_op, offset, n = qubo_to_ising_operator(bqm)
     print(f"{n} qubits, {len(cost_op)} Pauli terms, QAOA depth p={args.reps}")
 
-    ansatz = QAOAAnsatz(cost_operator=cost_op, reps=args.reps)
+    ansatz = qaoa_ansatz(cost_operator=cost_op, reps=args.reps)
 
     init_params = None
     if args.init_params:
@@ -307,8 +336,20 @@ def main():
     layout = getattr(isa_ansatz, "layout", None)
     isa_cost_op = cost_op.apply_layout(layout) if layout is not None else cost_op
 
-    isa_meas = isa_ansatz.copy()
-    isa_meas.measure_all()
+    # Measure the *logical* circuit and transpile that, rather than calling
+    # measure_all() on the transpiled one. After transpilation the logical
+    # qubits sit on arbitrary physical qubits (and SWAP routing moves them
+    # again), so measure_all() on the ISA circuit measures every physical
+    # qubit of the device -- 156 bits on ibm_fez -- and bit i is physical
+    # qubit i, not QUBO variable i. Measuring before transpiling lets the
+    # transpiler carry each measurement to wherever its qubit ends up, so the
+    # classical register keeps exactly n bits with bit i = QUBO variable i.
+    meas_circuit = ansatz.copy()
+    meas_circuit.measure_all()
+    isa_meas = pm.run(meas_circuit)
+    if isa_meas.num_clbits != n:
+        raise RuntimeError(f"expected {n} measured bits, got "
+                           f"{isa_meas.num_clbits}")
 
     if args.estimate:
         return report_estimate(args, isa_ansatz, isa_meas, backend)
@@ -353,7 +394,11 @@ def main():
               f"--init-params {params_str} --no-optimize)")
 
     shots = args.shots or 4096
-    sample_result = sampler.run([(isa_meas, best.x)], shots=shots).result()
+    sample_job = sampler.run([(isa_meas, best.x)], shots=shots)
+    job_id = sample_job.job_id() if hasattr(sample_job, "job_id") else None
+    if args.ibm is not None and job_id:
+        print(f"sampling job id: {job_id}")
+    sample_result = sample_job.result()
     counts = sample_result[0].data.meas.get_counts()
 
     scored = sorted(
@@ -364,7 +409,15 @@ def main():
     print(f"\nbest of {len(counts)} distinct bitstrings ({shots} shots): "
           f"energy={best_energy:.4f}, seen {best_count}/{shots} times")
 
+    groups = one_hot_groups(names)
+    feasible_shots = sum(cnt for sample, cnt in scored
+                         if is_one_hot_feasible(sample, groups))
+    mean_energy = sum(bqm.energy(sample) * cnt for sample, cnt in scored) / shots
+    print(f"mean sampled energy: {mean_energy:.4f}; one-hot feasible shots: "
+          f"{feasible_shots}/{shots} ({100 * feasible_shots / shots:.2f}%)")
+
     opt = brute_force_optimum(bqm, n, args.brute_force_limit)
+    opt_energy = None
     if opt is not None:
         _, opt_energy = opt
         gap = best_energy - opt_energy  # >= 0: energy is being minimized
@@ -387,9 +440,41 @@ def main():
     bad = {b: c for b, c in counts_by_block.items() if c != 1}
     if bad:
         print(f"assignment constraint VIOLATED (block -> #selected): {bad}")
-        return 1
-    print("assignment constraint satisfied (exactly one sequence per block)")
-    return 0
+        status = 1
+    else:
+        print("assignment constraint satisfied (exactly one sequence per block)")
+        status = 0
+
+    if args.save:
+        backend_name = (getattr(backend, "name", None) if backend is not None
+                        else "statevector")
+        report = {
+            "solver": "qaoa",
+            "qubo": args.qubo,
+            "backend": args.fake and f"aer+{args.fake}" or backend_name,
+            "job_id": job_id,
+            "reps": args.reps,
+            "parameters": [float(v) for v in best.x],
+            "parameter_order": [str(p) for p in ansatz.parameters],
+            "shots": shots,
+            "num_variables": n,
+            "isa_two_qubit_gates": sum(
+                c for g, c in isa_meas.count_ops().items()
+                if g in ("cx", "cz", "ecr")),
+            "isa_depth": isa_meas.depth(),
+            "mean_energy": mean_energy,
+            "feasible_fraction": feasible_shots / shots,
+            "best_energy": best_energy,
+            "optimum_energy": opt_energy,
+            "best_selection": selected,
+            # keys: bitstrings over the QUBO variables only, Qiskit order
+            # (variable 0 = rightmost character)
+            "counts": dict(sorted(counts.items(), key=lambda kv: -kv[1])),
+        }
+        with open(args.save, "w") as f:
+            json.dump(report, f, indent=1)
+        print(f"run saved to {args.save}")
+    return status
 
 
 if __name__ == "__main__":
