@@ -22,6 +22,7 @@ const state = {
   instance: null,     // currently selected or designed instance
   mode: 'benchmark',  // 'benchmark' = a file from data/, 'custom' = the designer
   result: null,
+  classicalResult: null,   // the last IP run, kept while a QUBO plan is on show
   steps: [],
   stepIndex: 0,
   playing: false,
@@ -261,6 +262,8 @@ async function selectInstance(name) {
   if (state.result && state.result.instance.name !== name) {
     stopPlayback();                       // a stale plan belongs to another instance
     state.result = null;
+    state.classicalResult = null;
+    updateClassicalBadge();
     state.steps = [];
     $('result-view').classList.add('hidden');
     $('empty-state').classList.remove('hidden');
@@ -550,8 +553,21 @@ function currentOptions() {
     disableGreedy: $('p-disable-greedy').checked,
     disableUpperBound: $('p-disable-ub').checked,
     verbose: $('p-verbose').checked ? 1 : null,
-    exportQubo: $('p-export-qubo').checked ? 'problem.qubo' : null,
+    exportQubo: $('p-export-qubo').checked ? exportName() : null,
   };
+}
+
+/* Where the server writes the export: qubo/<test case>[-E..][-T..].qubo. */
+function exportName() {
+  const base = state.mode === 'custom'
+    ? ($('d-name').value.trim() || 'custom instance')
+    : ($('instance-select').value || 'instance');
+  let stem = base.split('/').pop().replace(/\.(dat|txt)$/, '').replace(/[^A-Za-z0-9._-]+/g, '-')
+    .replace(/^[-.]+|[-.]+$/g, '') || 'custom';
+  const e = numberOrNull($('p-empty-tiers').value), t = numberOrNull($('p-max-height').value);
+  if (e !== null && e >= 0) stem += `-E${e}`;
+  if (t) stem += `-T${t}`;
+  return `qubo/${stem}.qubo`;
 }
 
 function updateCommandPreview() {
@@ -605,7 +621,12 @@ async function runSolver() {
     const data = await res.json();
     if (data.error) { showError(data.error); return; }
     state.result = data;
+    state.classicalResult = data;
     state.steps = data.steps || [];
+    updateClassicalBadge();
+    if (data.quboExport && data.quboExport.name && typeof loadQubo === 'function') {
+      loadQubo(data.quboExport.name, { quiet: true });
+    }
     if (data.stopped) {
       showStopNotice(data);
       if (!data.relocations.length) { state.result = null; return; }
@@ -619,6 +640,24 @@ async function runSolver() {
     // a run with "Also export QUBO" may have just written a new file
     if (typeof loadQuboFiles === 'function') loadQuboFiles();
   }
+}
+
+function updateClassicalBadge() {
+  const r = state.classicalResult;
+  $('classical-badge').textContent = !r ? 'not run'
+    : r.relocations && r.relocations.length ? `${r.relocations.length} moves` : 'no plan';
+}
+
+/* Play a plan replayed from QUBO columns (a sampler's or QAOA's answer) in the
+   classical player, with a banner saying where it came from. */
+function showPlan(plan, label) {
+  stopPlayback();
+  state.result = { ...plan, label: label || plan.label };
+  state.steps = plan.steps;
+  if (typeof setView === 'function') setView('classical');
+  $('error-box').classList.add('hidden');
+  renderResult();
+  $('result-view').scrollIntoView({ behavior: 'smooth', block: 'start' });
 }
 
 /* While a solve is in flight the Run button becomes the Stop button, so there is
@@ -967,12 +1006,46 @@ function renderResult() {
   $('tab-stdout').textContent = r.stdout || '(empty)';
   $('tab-stderr').textContent = r.stderr || '(empty)';
   $('solver-output-panel').classList.toggle('hidden', r.source === 'qubo');
+  renderPlanSource(r);
 
   const slider = $('step-slider');
   slider.max = String(Math.max(0, state.steps.length - 1));
   slider.value = '0';
   state.stepIndex = 0;
   renderCurrent();
+}
+
+function renderPlanSource(r) {
+  const box = $('plan-source');
+  box.textContent = '';
+  box.classList.toggle('hidden', r.source !== 'qubo');
+  if (r.source !== 'qubo') return;
+  const text = el('div');
+  text.appendChild(el('strong', null, `Plan from ${r.label || 'a QUBO selection'}`));
+  text.appendChild(el('span', 'hint', r.filled
+    ? ` — the selected columns, replayed move by move; ${r.filled} move(s) the QUBO leaves open ` +
+      '(provisional sequences) were completed greedily.'
+    : ' — the selected columns, replayed move by move exactly as the QUBO encodes them.'));
+  box.appendChild(text);
+  const actions = el('div', 'plan-source-actions');
+  const back = el('button', 'btn btn-ghost', '← Back to Quantum');
+  back.type = 'button';
+  back.addEventListener('click', () => setView('quantum'));
+  actions.appendChild(back);
+  if (state.classicalResult && state.classicalResult.relocations &&
+      state.classicalResult.relocations.length) {
+    const ip = el('button', 'btn btn-ghost',
+      `Show the IP solution (${state.classicalResult.relocations.length} moves)`);
+    ip.type = 'button';
+    ip.addEventListener('click', () => {
+      stopPlayback();
+      state.result = state.classicalResult;
+      state.steps = state.classicalResult.steps || [];
+      renderResult();
+    });
+    actions.appendChild(ip);
+  }
+  box.appendChild(actions);
 }
 
 function renderCurrent() {
@@ -1091,6 +1164,7 @@ document.querySelectorAll('.tab').forEach((tab) => tab.addEventListener('click',
 }));
 document.addEventListener('keydown', (e) => {
   if (/^(INPUT|SELECT|TEXTAREA)$/.test(document.activeElement.tagName)) return;
+  if ($('view-classical').classList.contains('hidden')) return;
   if (e.key === 'ArrowRight') { stopPlayback(); goToStep(state.stepIndex + 1); }
   else if (e.key === 'ArrowLeft') { stopPlayback(); goToStep(state.stepIndex - 1); }
   else if (e.key === ' ') { e.preventDefault(); state.playing ? stopPlayback() : startPlayback(); }
@@ -1101,7 +1175,8 @@ window.addEventListener('resize', () => {
   resizeTimer = setTimeout(() => { renderPreview(); renderCurrent(); }, 150);
 });
 
-/* Deep link: /?instance=data05-08-39.dat&E=2&t=60&run=1 */
+/* Deep link: /?instance=data05-08-39.dat&E=2&t=60&run=1
+   or straight to the quantum tab: /?qubo=qubo/data03-03-13-E2.qubo&view=quantum */
 function applyQueryParams() {
   const q = new URLSearchParams(location.search);
   const map = { E: 'p-empty-tiers', T: 'p-max-height', t: 'p-time-limit',
@@ -1111,6 +1186,9 @@ function applyQueryParams() {
   });
   if (q.get('g')) $('p-disable-greedy').checked = true;
   if (q.get('u')) $('p-disable-ub').checked = true;
+  if (q.get('qubo') && typeof loadQubo === 'function') {
+    loadQubo(q.get('qubo'), { quiet: q.get('view') !== 'quantum' });
+  }
   const name = q.get('instance');
   if (name && state.instances.some((i) => i.name === name)) {
     $('instance-select').value = name;

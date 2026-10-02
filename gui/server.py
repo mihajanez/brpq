@@ -15,8 +15,10 @@ import posixpath
 import re
 import shutil
 import subprocess
+import sys
 import tempfile
 import threading
+import time
 import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs
@@ -25,10 +27,20 @@ from . import qubo as qubo_model
 from .brp_instance import effective_tiers, read_instance, validate_bay, write_dat
 from .runner import ROOT, BINARY, Options, solve, stop_runs
 
+try:                                    # needs the project's .venv; the classical
+    from . import quantum               # GUI runs without it
+    QUANTUM_ERROR = None
+except Exception as _exc:               # pragma: no cover - depends on the env
+    quantum = None
+    QUANTUM_ERROR = f"{type(_exc).__name__}: {_exc}"
+
 STATIC_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
 DATA_DIR = os.path.join(ROOT, "data")
 CUSTOM_DIR = os.path.join(DATA_DIR, "custom")   # instances designed in the GUI
 CUSTOM_PREFIX = "custom/"
+QUBO_DIR = os.path.join(ROOT, "qubo")           # exports made from the GUI
+QUBO_DIRS = {"": ROOT, "data": DATA_DIR, "qubo": QUBO_DIR}
+QUBO_STAT_RE = re.compile(r"qubo_lb_objective=([-\d.]+)\s+ip_objective=([-\d.]+)")
 SAFE_NAME_RE = re.compile(r"[^A-Za-z0-9._-]+")
 _instance_cache = {}
 _cache_lock = threading.Lock()
@@ -83,27 +95,110 @@ def list_instances():
 
 
 def qubo_files():
-    """.qubo files sitting in the project root or in data/."""
+    """.qubo files in qubo/ (the GUI's exports), the project root and data/,
+    newest first, each with the provenance the GUI recorded for it."""
     found = []
-    for base, prefix in ((ROOT, ""), (DATA_DIR, "data/")):
+    for prefix, base in (("qubo/", QUBO_DIR), ("", ROOT), ("data/", DATA_DIR)):
         if not os.path.isdir(base):
             continue
         for name in sorted(os.listdir(base)):
             if name.endswith(".qubo"):
                 path = os.path.join(base, name)
+                meta = qubo_meta(path)
                 found.append({"name": prefix + name,
                               "size": os.path.getsize(path),
-                              "modified": os.path.getmtime(path)})
+                              "modified": os.path.getmtime(path),
+                              "instance": meta.get("instance") if meta else None})
+    found.sort(key=lambda f: -f["modified"])
     return found
 
 
 def qubo_path(name):
-    safe = os.path.basename(str(name or "problem.qubo"))
-    for base in (ROOT, DATA_DIR):
-        path = os.path.join(base, safe)
+    """'qubo/x.qubo', 'data/x.qubo' or 'x.qubo' (project root) -> a path. Only
+    the basename is used inside the chosen directory, so a name cannot escape."""
+    name = str(name or "problem.qubo")
+    prefix, _, base = name.rpartition("/")
+    safe = os.path.basename(base)
+    bases = [QUBO_DIRS[prefix]] if prefix in QUBO_DIRS else []
+    bases += [b for b in (ROOT, DATA_DIR, QUBO_DIR) if b not in bases]
+    for base_dir in bases:
+        path = os.path.join(base_dir, safe)
         if os.path.isfile(path):
             return path
-    raise FileNotFoundError(f"QUBO file not found: {safe}")
+    raise FileNotFoundError(f"QUBO file not found: {name}")
+
+
+def qubo_meta(path):
+    """The sidecar the GUI writes next to an export (<file>.qubo.json): which
+    test case and height limit the QUBO came from, and the IP's objective."""
+    try:
+        with open(path + ".json") as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return None
+
+
+def export_name(payload, instance):
+    stem = SAFE_NAME_RE.sub("-", os.path.splitext(
+        os.path.basename(payload.get("name") or instance.name))[0]).strip("-.") or "custom"
+    options = Options(payload)
+    if options.empty_tiers is not None and options.empty_tiers >= 0:
+        stem += f"-E{options.empty_tiers}"
+    if options.maximum_height:
+        stem += f"-T{options.maximum_height}"
+    return stem + ".qubo"
+
+
+def write_qubo_meta(path, payload, instance, result):
+    """Record where an export came from, so the quantum tab can replay its
+    samples against the right bay and compare them with the IP optimum."""
+    options = Options(payload)
+    meta = {
+        "instance": None if payload.get("bay") is not None else instance.name,
+        "name": instance.name,
+        "emptyTiers": options.empty_tiers,
+        "maximumHeight": options.maximum_height,
+        "heightLimit": result.get("heightLimit"),
+        "ipObjective": result.get("objective"),
+        "provenOptimal": (result.get("stats") or {}).get("optimal_value") is not None,
+        "relocations": len(result.get("relocations") or []),
+        "solveSeconds": (result.get("stats") or {}).get("total_time", result.get("wallTime")),
+        "created": time.strftime("%Y-%m-%d %H:%M:%S"),
+    }
+    if payload.get("bay") is not None:          # a design that may never be saved
+        meta["bay"] = instance.bay
+        meta["tiers"] = instance.file_number_of_tiers
+    match = QUBO_STAT_RE.search(result.get("stderr") or "")
+    if match:
+        meta["quboLowerBound"] = float(match.group(1))
+    with open(path + ".json", "w") as f:
+        json.dump(meta, f, indent=1)
+    return meta
+
+
+def replay_context(payload, path=None):
+    """(instance, height limit, where they came from) to replay QUBO samples
+    against: the export's sidecar when there is one, else the sidebar."""
+    meta = qubo_meta(path) if path else None
+    if meta:
+        try:
+            if meta.get("bay") is not None:
+                handle, scratch = tempfile.mkstemp(prefix="rbrp-qubo-", suffix=".dat")
+                os.close(handle)
+                try:
+                    write_dat(scratch, meta["bay"], meta.get("tiers"))
+                    instance = read_instance(scratch, name=meta.get("name") or "custom")
+                finally:
+                    os.unlink(scratch)
+            else:
+                instance = load_instance(meta["instance"])
+            limit = meta.get("heightLimit") or effective_tiers(
+                instance, meta.get("emptyTiers"), meta.get("maximumHeight"))
+            return instance, limit, "export"
+        except Exception:
+            pass
+    instance, limit = qubo_height_limit(payload)
+    return instance, limit, "sidebar" if instance else None
 
 
 def qubo_height_limit(payload):
@@ -145,7 +240,8 @@ class Handler(BaseHTTPRequestHandler):
     server_version = "rbrp-gui"
 
     def log_message(self, fmt, *args):                  # keep the console readable
-        if self.path.startswith("/api/solve"):
+        if self.path.startswith("/api/solve") or (
+                self.path.startswith("/api/quantum/") and "/job" not in self.path):
             print(f"[gui] {fmt % args}")
 
     # ------------------------------------------------------------------ helpers
@@ -193,11 +289,19 @@ class Handler(BaseHTTPRequestHandler):
 
         if route == "/api/qubo":
             try:
-                path = qubo_path((query.get("path") or [""])[0])
+                name = (query.get("path") or [""])[0]
+                path = qubo_path(name)
                 variables, terms = qubo_model.load(path)
-                self.send_json(qubo_model.summarize(path, variables, terms))
+                summary = qubo_model.summarize(path, variables, terms)
+                summary["path"] = name or summary["path"]
+                summary["meta"] = qubo_meta(path)
+                self.send_json(summary)
             except Exception as exc:
                 self.send_json({"error": str(exc)}, status=400)
+            return
+
+        if route.startswith("/api/quantum/"):
+            self.quantum_get(route[len("/api/quantum/"):], query)
             return
 
         if route == "/api/instance":
@@ -225,7 +329,7 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         route = urlparse(self.path).path
         if route not in ("/api/solve", "/api/save-instance", "/api/stop",
-                         "/api/qubo-eval"):
+                         "/api/qubo-eval") and not route.startswith("/api/quantum/"):
             self.send_error(404, "not found")
             return
         length = int(self.headers.get("Content-Length") or 0)
@@ -243,6 +347,10 @@ class Handler(BaseHTTPRequestHandler):
 
         if route == "/api/qubo-eval":
             self.qubo_eval(payload)
+            return
+
+        if route.startswith("/api/quantum/"):
+            self.quantum_post(route[len("/api/quantum/"):], payload)
             return
 
         if route == "/api/save-instance":
@@ -267,9 +375,13 @@ class Handler(BaseHTTPRequestHandler):
 
         options = Options(payload)
         if options.export_qubo:
-            options.export_qubo = os.path.join(ROOT, os.path.basename(options.export_qubo))
+            # GUI exports go to qubo/<test case>.qubo -- never over problem.qubo,
+            # which is tracked -- with a sidecar saying where they came from
+            os.makedirs(QUBO_DIR, exist_ok=True)
+            options.export_qubo = os.path.join(QUBO_DIR, export_name(payload, instance))
 
         print(f"[gui] solving {instance.name} ...")
+        started = time.time() - 1
         try:
             result = solve(instance, options, run_id=payload.get("runId"))
         except Exception as exc:
@@ -280,6 +392,14 @@ class Handler(BaseHTTPRequestHandler):
                 os.unlink(scratch)
         print(f"[gui] {instance.name}: objective={result.get('objective')} "
               f"({result.get('wallTime', 0):.2f}s)")
+        if options.export_qubo and os.path.isfile(options.export_qubo) \
+                and os.path.getmtime(options.export_qubo) >= started:
+            try:
+                meta = write_qubo_meta(options.export_qubo, payload, instance, result)
+                result["quboExport"] = {"name": "qubo/" + os.path.basename(options.export_qubo),
+                                        "meta": meta}
+            except OSError as exc:
+                result["quboExport"] = {"error": str(exc)}
         self.send_json(result)
 
     def qubo_eval(self, payload):
@@ -291,12 +411,13 @@ class Handler(BaseHTTPRequestHandler):
             self.send_json({"error": str(exc)}, status=400)
             return
 
-        instance, height_limit = qubo_height_limit(payload)
+        instance, height_limit, source = replay_context(payload, path)
         matches, blocking = (qubo_model.instance_matches(instance, variables)
                              if instance else (None, None))
 
         result = {"instanceMatches": matches, "heightLimit": height_limit,
-                  "instance": instance.name if instance else None}
+                  "instance": instance.name if instance else None,
+                  "contextSource": source}
 
         if payload.get("search"):
             if instance is None:
@@ -336,29 +457,149 @@ class Handler(BaseHTTPRequestHandler):
 
         if instance is not None and not result["violations"]:
             plan, error = qubo_model.move_plan(instance, variables, selection,
-                                               height_limit)
+                                               height_limit,
+                                               complete=bool(payload.get("complete")))
             result["planError"] = error
             if plan:
-                steps = plan["steps"]
-                result["plan"] = {
-                    "source": "qubo",
-                    "ok": True,
-                    "instance": instance.as_dict(),
-                    "heightLimit": height_limit,
-                    "steps": steps,
-                    "relocations": [{"number": i + 1, "block": b, "src": s, "dst": d}
-                                    for i, (b, s, d) in enumerate(plan["relocations"])],
-                    "retrievals": sum(1 for s in steps if s["kind"] == "retrieve"),
-                    "objective": len(plan["relocations"]),
-                    "energy": relaxed,
-                    "stats": {},
-                    "stdout": "", "stderr": "",
-                    "wallTime": 0.0, "replayError": None,
-                }
+                result["plan"] = qubo_model.plan_payload(instance, plan, height_limit,
+                                                         energy=relaxed,
+                                                         label=payload.get("label"))
         elif instance is None:
             result["planError"] = "no test case selected to replay the plan against"
 
         self.send_json(result)
+
+    # ------------------------------------------------------------- quantum
+    def quantum_ready(self):
+        if quantum is None:
+            self.send_json({"error": "the quantum tools are not importable here ("
+                                     f"{QUANTUM_ERROR}); start the GUI with the project's "
+                                     ".venv/bin/python"}, status=503)
+            return False
+        return True
+
+    def send_quantum(self, payload, status=200):
+        body = quantum.to_json(payload).encode()
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        self.wfile.write(body)
+
+    def send_bytes(self, body, ctype, filename=None):
+        self.send_response(200)
+        self.send_header("Content-Type", ctype)
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "no-store")
+        if filename:
+            self.send_header("Content-Disposition", f'attachment; filename="{filename}"')
+        self.end_headers()
+        self.wfile.write(body)
+
+    def quantum_problem(self, payload):
+        path = qubo_path(payload.get("path"))
+        problem = quantum.problem_for(path)
+        instance, limit, source = replay_context(payload, path)
+        return problem, (instance, limit), source
+
+    def quantum_get(self, action, query):
+        if action == "status":
+            if quantum is None:
+                self.send_json({"available": False, "error": QUANTUM_ERROR,
+                                "python": sys.executable})
+            else:
+                self.send_quantum({"available": True, **quantum.status(),
+                                   "devices": quantum.devices(),
+                                   "topologies": quantum.TOPOLOGIES,
+                                   "annealMethods": quantum.ANNEAL_METHODS})
+            return
+        if not self.quantum_ready():
+            return
+        one = lambda key, default="": (query.get(key) or [default])[0]
+        try:
+            if action == "job":
+                job = quantum.get_job(one("id"))
+                if job is None:
+                    self.send_json({"error": "unknown or expired job"}, status=404)
+                    return
+                self.send_quantum(job.view(int(one("since", "0") or 0)))
+            elif action == "diagram":
+                problem = quantum.problem_for(qubo_path(one("path")))
+                svg = quantum.call(quantum.draw, problem, int(one("reps", "1")),
+                                   one("kind", "logical"), one("device") or None,
+                                   one("fold") or None)
+                self.send_bytes(svg, "image/svg+xml")
+            elif action == "export":
+                problem = quantum.problem_for(qubo_path(one("path")))
+                params = [float(v) for v in one("params").split(",") if v.strip()] or None
+                filename, ctype, body = quantum.call(quantum.export, problem, one("what"),
+                                                     int(one("reps", "1")), params,
+                                                     one("embedding") or None)
+                self.send_bytes(body, ctype, filename)
+            elif action == "ibm-jobs":
+                self.send_quantum({"jobs": quantum.ibm_job_log()})
+            else:
+                self.send_json({"error": f"unknown action {action}"}, status=404)
+        except Exception as exc:
+            self.send_json({"error": f"{type(exc).__name__}: {exc}"}, status=400)
+
+    JOB_ACTIONS = {"anneal", "qaoa-run", "qaoa-estimate", "qaoa-landscape", "ibm-submit"}
+
+    def quantum_post(self, action, payload):
+        if not self.quantum_ready():
+            return
+        try:
+            if action == "cancel":
+                self.send_json({"cancelled": quantum.cancel_job(payload.get("id"))})
+                return
+            if action == "qpu-timing":
+                self.send_quantum(quantum.qpu_timing(payload.get("topology") or "pegasus",
+                                                     int(payload.get("qubits") or 1),
+                                                     int(payload.get("reads") or 1000),
+                                                     payload.get("annealTime")))
+                return
+            if action == "ibm-backends":
+                self.send_quantum(quantum.call(quantum.ibm_backends, payload.get("creds")))
+                return
+            problem, ctx, source = self.quantum_problem(payload)
+            if action == "embed":
+                self.send_quantum(quantum.call(quantum.embed, problem,
+                                               payload.get("topology") or "pegasus",
+                                               payload.get("seed") or 1,
+                                               payload.get("tries") or 10,
+                                               payload.get("timeout") or 30))
+            elif action == "qaoa-build":
+                self.send_quantum(quantum.call(quantum.qaoa_build, problem,
+                                               payload.get("reps") or 1))
+            elif action == "ibm-check":
+                self.send_quantum(quantum.call(quantum.ibm_check, problem,
+                                               payload.get("creds"), payload))
+            elif action == "ibm-job":
+                self.send_quantum(quantum.call(quantum.ibm_job, problem, ctx,
+                                               payload.get("creds"),
+                                               str(payload.get("jobId") or "").strip(),
+                                               bool(payload.get("oldSign"))))
+            elif action in self.JOB_ACTIONS:
+                if action == "anneal":
+                    job = quantum.start_job(action, lambda job: quantum.anneal(problem, ctx, payload))
+                elif action == "qaoa-run":
+                    job = quantum.start_job(action, quantum.qaoa_run, problem, ctx, payload)
+                elif action == "qaoa-estimate":
+                    job = quantum.start_job(action, quantum.qaoa_estimate, problem, payload)
+                elif action == "qaoa-landscape":
+                    job = quantum.start_job(action, quantum.qaoa_landscape, problem, payload)
+                else:
+                    job = quantum.start_job(action, lambda job: quantum.ibm_submit(
+                        problem, payload.get("creds"), payload))
+                print(f"[gui] quantum {action} on {problem.name} (job {job.id})")
+                self.send_quantum({"job": job.id, "contextSource": source,
+                                   "instance": ctx[0].name if ctx[0] else None,
+                                   "heightLimit": ctx[1]})
+            else:
+                self.send_json({"error": f"unknown action {action}"}, status=404)
+        except Exception as exc:
+            self.send_json({"error": f"{type(exc).__name__}: {exc}"}, status=400)
 
     def save_instance(self, payload):
         """Store a designed bay as data/custom/<name>.dat so it can be reloaded."""

@@ -179,27 +179,48 @@ function renderQuboColumns() {
   });
 }
 
-async function loadQubo() {
-  const name = $('qubo-file').value;
+/* Load a QUBO into the Quantum tab. `name` defaults to the sidebar choice;
+   quiet loads (after a run that exported one) do not switch tabs. */
+async function loadQubo(name, opts) {
+  name = typeof name === 'string' ? name : $('qubo-file').value;
   if (!name) return;
   try {
+    if (opts && opts.quiet) await loadQuboFiles();
     const res = await fetch('/api/qubo?path=' + encodeURIComponent(name));
     const data = await res.json();
     if (data.error) { showError(data.error); return; }
     qubo.model = data;
-    $('qubo-view').classList.remove('hidden');
+    if ([...$('qubo-file').options].some((o) => o.value === name)) $('qubo-file').value = name;
     $('qubo-file-name').textContent = data.path;
     $('qubo-eval-result').textContent = '';
     renderQuboStats();
-    drawQuboMatrix();
     renderQuboLegend();
     renderQuboInterpretation();
     renderQuboColumns();
-    $('qubo-match').className = 'pill pill-muted';
-    $('qubo-match').textContent = `replays against ${$('instance-select').value || 'no test case'}`;
-    $('qubo-view').scrollIntoView({ behavior: 'smooth', block: 'start' });
+    renderQuboMatch();
+    if (typeof onQuboLoaded === 'function') onQuboLoaded(data);
+    if (!(opts && opts.quiet) && typeof setView === 'function') {
+      setView('quantum');
+      setSub('qubo');
+    }
+    drawQuboMatrix();
   } catch (err) {
     showError('Could not load the QUBO file: ' + err);
+  }
+}
+
+/* Say which test case the QUBO's samples are replayed against. */
+function renderQuboMatch() {
+  const meta = qubo.model.meta;
+  const pill = $('qubo-match');
+  if (meta) {
+    pill.className = 'pill pill-good';
+    pill.textContent = `exported from ${meta.name}` +
+      (meta.heightLimit ? ` · height limit ${meta.heightLimit}` : '') +
+      (meta.ipObjective !== null && meta.ipObjective !== undefined ? ` · IP optimum ${meta.ipObjective}` : '');
+  } else {
+    pill.className = 'pill pill-muted';
+    pill.textContent = `no export record — replays against ${$('instance-select').value || 'no test case'}`;
   }
 }
 
@@ -244,7 +265,8 @@ function renderQuboEval(r) {
   const match = $('qubo-match');
   if (r.instanceMatches === true) {
     match.className = 'pill pill-good';
-    match.textContent = `matches ${r.instance}`;
+    match.textContent = `matches ${r.instance}` +
+      (r.contextSource === 'export' ? ' (from the export record)' : '');
   } else if (r.instanceMatches === false) {
     match.className = 'pill pill-bad';
     match.textContent = `does not match ${r.instance}`;
@@ -283,7 +305,7 @@ function renderQuboEval(r) {
     add('model objective', `${r.objective}  = energy ${r.energyRelaxed} + offset ${r.offset}`);
   }
   add('one-hot check', r.violations.length ? r.violations.join('; ') : 'one column per block ✓');
-  add('height limit applied', `${r.heightLimit} tiers (from the parameter panel)`);
+  add('height limit applied', `${r.heightLimit} tiers (${r.contextSource === 'export' ? 'from the export record' : 'from the parameter panel'})`);
   box.appendChild(facts);
 
   if (r.unknown && r.unknown.length) {
@@ -295,12 +317,7 @@ function renderQuboEval(r) {
       `Replays into a valid ${r.plan.relocations.length}-relocation plan. `));
     const button = el('button', 'btn btn-primary', 'Show this plan in the player');
     button.type = 'button';
-    button.addEventListener('click', () => {
-      state.result = r.plan;
-      state.steps = r.plan.steps;
-      renderResult();
-      $('result-view').scrollIntoView({ behavior: 'smooth', block: 'start' });
-    });
+    button.addEventListener('click', () => showPlan(r.plan, 'a QUBO selection'));
     line.appendChild(button);
     box.appendChild(line);
   } else if (r.planError) {
@@ -316,7 +333,7 @@ async function loadQuboFiles() {
     select.textContent = '';
     (data.files || []).forEach((f) => {
       const option = el('option', null,
-        `${f.name}  (${(f.size / 1024).toFixed(1)} kB)`);
+        `${f.name}  (${(f.size / 1024).toFixed(1)} kB${f.instance ? ', from ' + f.instance : ''})`);
       option.value = f.name;
       select.appendChild(option);
     });
@@ -333,7 +350,7 @@ async function loadQuboFiles() {
   }
 }
 
-$('qubo-load').addEventListener('click', loadQubo);
+$('qubo-load').addEventListener('click', () => loadQubo());
 $('qubo-search').addEventListener('click', () => evaluateQubo({ search: true }));
 $('qubo-cheapest').addEventListener('click', () => evaluateQubo({ cheapest: true }));
 $('qubo-eval').addEventListener('click', () => evaluateQubo());

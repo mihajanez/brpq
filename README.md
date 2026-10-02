@@ -45,8 +45,12 @@ own optimum next to the IP's, which must agree.
 
     make gui
 
-starts a local web GUI (standard library only) for picking a test case, setting
-the parameters and stepping through the solution — see [gui/README.md](gui/README.md).
+starts a local web GUI for picking a test case, setting the parameters and stepping
+through the solution, with a second tab that takes the exported QUBO to D-Wave
+annealing (embedding, classical samplers, Leap) and to QAOA (Qiskit circuit,
+estimates, Aer simulation, IBM Quantum jobs) and compares every run with the IP
+optimum — see [gui/README.md](gui/README.md). The classical tab needs only the
+standard library; the quantum tab needs the `.venv`.
 
 ## QAOA and re-scoring saved runs
 

@@ -12,7 +12,7 @@
     <span class="brand-mark"></span>
     <div>
       <h1>Restricted BRP Solver</h1>
-      <p class="brand-sub">Block relocation problem &middot; exact IP model solved with Gurobi</p>
+      <p class="brand-sub">Block relocation problem &middot; exact IP model (Gurobi) &middot; QUBO on D-Wave annealing and IBM QAOA</p>
     </div>
   </div>
   <div class="topbar-actions">
@@ -94,16 +94,18 @@
         <label class="check"><input id="p-verbose" type="checkbox">
           <span>Verbose solver log <code>-v 1</code></span></label>
         <p class="help">Echoes the instance and progress details into the log tab.</p>
-        <label class="check"><input id="p-export-qubo" type="checkbox">
-          <span>Also export QUBO <code>-Q problem.qubo</code></span></label>
-        <p class="help">Writes the QUBO formulation for the quantum solvers. Classical results are unaffected.</p>
+        <label class="check"><input id="p-export-qubo" type="checkbox" checked>
+          <span>Also export QUBO <code>-Q qubo/&hellip;</code></span></label>
+        <p class="help">Writes the QUBO formulation to <code>qubo/&lt;test case&gt;.qubo</code>
+          and loads it into the <strong>Quantum</strong> tab. Classical results are unaffected.</p>
       </div>
     </section>
 
     <section class="block">
       <h2>QUBO model</h2>
-      <p class="hint">Inspect a <code>.qubo</code> file exported with <code>-Q</code>:
-        the matrix, what each column stands for, and what a selection of columns costs.</p>
+      <p class="hint">Load a <code>.qubo</code> file exported with <code>-Q</code> into the
+        <strong>Quantum</strong> tab: the matrix, D-Wave annealing and QAOA. A run with
+        <em>Also export QUBO</em> loads its export automatically.</p>
       <select id="qubo-file" class="input"></select>
       <button id="qubo-load" class="btn" type="button">Load QUBO</button>
     </section>
@@ -125,6 +127,16 @@
 
   <!-- ------------------------------------------------------------- results -->
   <section class="results">
+    <nav class="main-tabs" role="tablist" aria-label="Results">
+      <button class="main-tab is-active" type="button" role="tab" data-view="classical"
+              aria-selected="true">Classical solution
+        <span id="classical-badge" class="tab-badge">not run</span></button>
+      <button class="main-tab" type="button" role="tab" data-view="quantum"
+              aria-selected="false">Quantum
+        <span id="quantum-badge" class="tab-badge">no QUBO</span></button>
+    </nav>
+
+    <div id="view-classical" class="view">
     <div id="empty-state" class="panel empty-state">
       <h2>Pick a test case and run the solver</h2>
       <p>The bay below is the instance as loaded. Blocks are shaded by retrieval order:
@@ -158,43 +170,8 @@
       </div>
     </div>
 
-    <div id="qubo-view" class="panel hidden">
-      <div class="panel-head">
-        <h2>QUBO model <code id="qubo-file-name"></code></h2>
-        <span id="qubo-match" class="pill pill-muted"></span>
-      </div>
-      <div id="qubo-stats" class="stat-row stat-row-tight"></div>
-
-      <div class="qubo-matrix">
-        <canvas id="qubo-canvas"></canvas>
-        <div id="qubo-tip" class="qubo-tip hidden"></div>
-      </div>
-      <div class="legend" id="qubo-legend"></div>
-
-      <div id="qubo-interpretation" class="prose"></div>
-
-      <div class="qubo-actions">
-        <button id="qubo-search" class="btn btn-primary" type="button">Find the best replayable selection</button>
-        <button id="qubo-cheapest" class="btn btn-ghost" type="button">Cheapest column per block</button>
-        <input id="qubo-selection" class="input" type="text"
-               placeholder="x(5,0), x(8,2)&hellip; or a bitstring from a sampler">
-        <button id="qubo-eval" class="btn" type="button">Evaluate</button>
-      </div>
-      <div id="qubo-eval-result" class="prose"></div>
-
-      <details class="qubo-columns">
-        <summary>All <span id="qubo-column-count"></span> columns</summary>
-        <div class="table-wrap">
-          <table id="qubo-vars" class="table">
-            <thead><tr><th>#</th><th>Name</th><th>Kind</th><th>Block</th>
-              <th>Cost</th><th>Linear</th><th>Moves</th></tr></thead>
-            <tbody></tbody>
-          </table>
-        </div>
-      </details>
-    </div>
-
     <div id="result-view" class="hidden">
+      <div id="plan-source" class="panel plan-source hidden"></div>
       <div id="stat-row" class="stat-row"></div>
 
       <div class="panel">
@@ -265,10 +242,410 @@
     </div>
 
     <div id="error-box" class="panel error hidden"></div>
+    </div>
+
+    <div id="view-quantum" class="view hidden">
+    <div id="quantum-empty" class="panel empty-state">
+      <h2>No QUBO loaded yet</h2>
+      <p>The quantum tab works on the QUBO form of a test case. Two ways in:</p>
+      <ol class="steps-list">
+        <li>Run the classical solver with <strong>Also export QUBO</strong> ticked (it is by
+          default) — the export lands in <code>qubo/</code> and loads here automatically, tied
+          to the test case and height limit it came from.</li>
+        <li>Or pick any <code>.qubo</code> file under <strong>QUBO model</strong> in the sidebar
+          and press <em>Load QUBO</em>.</li>
+      </ol>
+      <div id="quantum-toolkit" class="toolkit"></div>
+    </div>
+
+    <div id="quantum-main" class="hidden">
+      <div class="panel pipeline-panel">
+        <ol id="pipeline" class="pipeline"></ol>
+      </div>
+
+      <div class="seg subnav" id="quantum-subnav" role="tablist">
+        <button class="seg-btn is-active" type="button" data-sub="qubo">QUBO model</button>
+        <button class="seg-btn" type="button" data-sub="anneal">Quantum annealing · D-Wave</button>
+        <button class="seg-btn" type="button" data-sub="qaoa">QAOA · IBM Qiskit</button>
+        <button class="seg-btn" type="button" data-sub="summary">Results &amp; comparison</button>
+      </div>
+
+      <div id="q-error" class="panel error hidden"></div>
+
+      <!-- ========================================================= QUBO model -->
+      <section id="q-qubo" class="q-section">
+        <div id="qubo-view" class="panel">
+          <div class="panel-head">
+            <h2>QUBO model <code id="qubo-file-name"></code></h2>
+            <span id="qubo-match" class="pill pill-muted"></span>
+          </div>
+          <div id="qubo-stats" class="stat-row stat-row-tight"></div>
+
+          <div class="qubo-matrix">
+            <canvas id="qubo-canvas"></canvas>
+            <div id="qubo-tip" class="qubo-tip hidden"></div>
+          </div>
+          <div class="legend" id="qubo-legend"></div>
+
+          <div id="qubo-interpretation" class="prose"></div>
+
+          <div class="qubo-actions">
+            <button id="qubo-search" class="btn btn-primary" type="button">Find the best replayable selection</button>
+            <button id="qubo-cheapest" class="btn btn-ghost" type="button">Cheapest column per block</button>
+            <input id="qubo-selection" class="input" type="text"
+                   placeholder="x(5,0), x(8,2)&hellip; or a bitstring from a sampler">
+            <button id="qubo-eval" class="btn" type="button">Evaluate</button>
+          </div>
+          <div id="qubo-eval-result" class="prose"></div>
+
+          <details class="qubo-columns">
+            <summary>All <span id="qubo-column-count"></span> columns</summary>
+            <div class="table-wrap">
+              <table id="qubo-vars" class="table">
+                <thead><tr><th>#</th><th>Name</th><th>Kind</th><th>Block</th>
+                  <th>Cost</th><th>Linear</th><th>Moves</th></tr></thead>
+                <tbody></tbody>
+              </table>
+            </div>
+          </details>
+        </div>
+      </section>
+
+      <!-- ========================================================== annealing -->
+      <section id="q-anneal" class="q-section hidden">
+        <div class="panel">
+          <div class="panel-head">
+            <h2>1 · Embed on the QPU graph</h2>
+            <span class="hint">minorminer · ideal full-yield graph</span>
+          </div>
+          <p class="hint">A D-Wave QPU can only couple qubits that are wired together, so each
+            QUBO variable becomes a <em>chain</em> of physical qubits held together by a strong
+            ferromagnetic coupling. The longer the chains, the more qubits the problem costs and
+            the likelier a chain is to break.</p>
+          <div class="form-row">
+            <label class="mini">Topology
+              <select id="a-topology" class="input input-inline">
+                <option value="pegasus">Advantage — Pegasus P16 (5640 qubits)</option>
+                <option value="zephyr">Advantage2 — Zephyr Z12 (4800 qubits)</option>
+                <option value="chimera">D-Wave 2000Q — Chimera C16 (2048 qubits)</option>
+              </select></label>
+            <label class="mini">Seed <input id="a-embed-seed" class="input input-inline narrow" type="number" value="1" min="0"></label>
+            <label class="mini">Tries <input id="a-embed-tries" class="input input-inline narrow" type="number" value="10" min="1" max="100"></label>
+            <button id="a-embed" class="btn btn-primary" type="button">Find embedding</button>
+            <span id="a-embed-busy" class="inline-busy hidden"><span class="spinner"></span>embedding…</span>
+          </div>
+          <div id="a-embed-result" class="hidden">
+            <div id="a-embed-stats" class="stat-row stat-row-tight"></div>
+            <div class="embed-wrap">
+              <canvas id="a-embed-canvas" aria-label="Embedding of the QUBO on the QPU graph"></canvas>
+              <div id="a-embed-tip" class="qubo-tip hidden"></div>
+            </div>
+            <div class="legend" id="a-embed-legend"></div>
+            <div class="form-row">
+              <div class="seg seg-inline" id="a-embed-zoom">
+                <button class="seg-btn is-active" type="button" data-zoom="fit">Zoom to embedding</button>
+                <button class="seg-btn" type="button" data-zoom="chip">Whole chip</button>
+              </div>
+              <a id="a-embed-download" class="btn btn-ghost" href="#" download>Download embedding (JSON)</a>
+            </div>
+            <div id="a-embed-notes" class="prose"></div>
+          </div>
+        </div>
+
+        <div class="panel">
+          <div class="panel-head">
+            <h2>2 · Sample</h2>
+            <span class="hint">dwave-samplers · dimod · Leap</span>
+          </div>
+          <div class="form-grid">
+            <label class="field-col wide">Method
+              <select id="a-method" class="input">
+                <optgroup label="Classical simulation of the annealer">
+                  <option value="sa">Simulated annealing — logical QUBO</option>
+                  <option value="sa-embedded">Simulated annealing — embedded QPU problem (chains)</option>
+                </optgroup>
+                <optgroup label="Other classical D-Wave solvers">
+                  <option value="tabu">Tabu search</option>
+                  <option value="steepest">Steepest descent</option>
+                  <option value="tree">Tree decomposition (exact)</option>
+                  <option value="exact">Exhaustive enumeration (exact, ≤ 24 variables)</option>
+                  <option value="random">Random sampler (baseline)</option>
+                </optgroup>
+                <optgroup label="D-Wave cloud — needs a Leap token">
+                  <option value="qpu">D-Wave QPU</option>
+                  <option value="hybrid">Leap hybrid BQM solver</option>
+                </optgroup>
+              </select></label>
+            <label class="field-col">Reads <input id="a-reads" class="input" type="number" value="1000" min="1" max="100000"></label>
+            <label class="field-col" data-for="sa sa-embedded">Sweeps <input id="a-sweeps" class="input" type="number" value="1000" min="10"></label>
+            <label class="field-col" data-for="tabu">Timeout / read (ms) <input id="a-tabu-timeout" class="input" type="number" value="20" min="5"></label>
+            <label class="field-col">Anneal time (µs) <input id="a-anneal-time" class="input" type="number" value="20" min="0.5" step="0.5"></label>
+            <label class="field-col" data-for="sa-embedded qpu">Chain strength <input id="a-chain" class="input" type="number" step="0.5" placeholder="auto"></label>
+            <label class="field-col">Seed <input id="a-seed" class="input" type="number" value="1" min="0"></label>
+            <label class="field-col wide" data-for="qpu hybrid">Leap API token
+              <input id="a-token" class="input" type="password" autocomplete="off" placeholder="blank = use dwave config / DWAVE_API_TOKEN"></label>
+            <label class="field-col" data-for="qpu">Solver <input id="a-solver" class="input" type="text" placeholder="any of this topology"></label>
+            <label class="field-col" data-for="hybrid">Time limit (s) <input id="a-time-limit" class="input" type="number" min="3" placeholder="solver default"></label>
+          </div>
+          <p id="a-method-help" class="help"></p>
+          <div class="form-row">
+            <button id="a-run" class="btn btn-primary" type="button">Run sampler</button>
+            <span id="a-run-busy" class="inline-busy hidden"><span class="spinner"></span><span id="a-run-note">sampling…</span></span>
+          </div>
+          <div id="a-timing" class="timing-box"></div>
+        </div>
+
+        <div id="a-result" class="hidden">
+          <div id="a-stats" class="stat-row"></div>
+          <div class="panel-grid">
+            <div class="panel">
+              <div class="panel-head"><h2>Energy of the reads</h2>
+                <div class="legend" id="a-hist-legend"></div></div>
+              <div id="a-hist" class="chart-host"></div>
+            </div>
+            <div class="panel">
+              <div class="panel-head"><h2>Interpretation</h2></div>
+              <div id="a-interpretation" class="prose"></div>
+            </div>
+          </div>
+          <div class="panel">
+            <div class="panel-head"><h2>Lowest-energy samples</h2>
+              <span class="hint">click a row to play its move plan</span></div>
+            <div class="table-wrap"><table id="a-samples" class="table"></table></div>
+          </div>
+        </div>
+      </section>
+
+      <!-- =============================================================== QAOA -->
+      <section id="q-qaoa" class="q-section hidden">
+        <div class="panel">
+          <div class="panel-head">
+            <h2>1 · QAOA circuit</h2>
+            <span class="hint">qiskit.circuit.library.qaoa_ansatz</span>
+          </div>
+          <p class="hint">The QUBO becomes an Ising cost Hamiltonian
+            <code>H = Σ h<sub>i</sub> Z<sub>i</sub> + Σ J<sub>ij</sub> Z<sub>i</sub>Z<sub>j</sub></code>
+            on one qubit per column (a measured 1 = column selected). Each of the <em>p</em> layers
+            applies the cost phase <code>e<sup>−iγH</sup></code> (RZ and RZZ gates) and the mixer
+            <code>e<sup>−iβΣX</sup></code> (RX gates), starting from the uniform superposition.</p>
+          <div class="form-row">
+            <label class="mini">Depth <em>p</em> <input id="c-reps" class="input input-inline narrow" type="number" value="1" min="1" max="12"></label>
+            <button id="c-build" class="btn btn-primary" type="button">Build circuit</button>
+            <span id="c-build-busy" class="inline-busy hidden"><span class="spinner"></span>building…</span>
+          </div>
+          <div id="c-result" class="hidden">
+            <div id="c-stats" class="stat-row stat-row-tight"></div>
+            <div class="form-row">
+              <div class="seg seg-inline" id="c-diagram-kind">
+                <button class="seg-btn is-active" type="button" data-kind="logical">Logical circuit</button>
+                <button class="seg-btn" type="button" data-kind="basis">Basis gates</button>
+                <button class="seg-btn" type="button" data-kind="transpiled">Transpiled for device</button>
+              </div>
+              <select id="c-diagram-device" class="input input-inline hidden"></select>
+              <a id="c-diagram-open" class="btn btn-ghost" href="#" target="_blank" rel="noopener">Open full size</a>
+              <span class="hint">click the diagram to zoom</span>
+            </div>
+            <div class="diagram-wrap">
+              <div id="c-diagram-busy" class="inline-busy hidden"><span class="spinner"></span>drawing with Qiskit's matplotlib drawer…</div>
+              <img id="c-diagram" alt="QAOA circuit diagram drawn by Qiskit">
+              <p id="c-diagram-error" class="qubo-bad hidden"></p>
+            </div>
+            <details class="qubo-columns">
+              <summary>Cost Hamiltonian — <span id="c-ham-count"></span> Pauli terms</summary>
+              <div class="table-wrap"><table id="c-hamiltonian" class="table"></table></div>
+            </details>
+            <div class="export-row">
+              <span class="hint">Export:</span>
+              <a class="btn btn-ghost" data-export="qasm3" href="#">OpenQASM 3 (parameterised)</a>
+              <a class="btn btn-ghost" data-export="qpy" href="#">QPY</a>
+              <a class="btn btn-ghost" data-export="hamiltonian" href="#">Hamiltonian (txt)</a>
+              <a class="btn btn-ghost needs-angles" data-export="qasm3-bound" href="#">OpenQASM 3 (tuned angles)</a>
+              <a class="btn btn-ghost needs-angles" data-export="qasm2-bound" href="#">OpenQASM 2 for IBM Composer</a>
+              <a class="btn btn-ghost needs-angles" data-export="ibm-script" href="#">Python script for IBM Runtime</a>
+            </div>
+          </div>
+        </div>
+
+        <div class="panel">
+          <div class="panel-head">
+            <h2>2 · Estimates</h2>
+            <span class="hint">transpiled offline against IBM device snapshots — no account needed</span>
+          </div>
+          <div class="form-row">
+            <div id="e-devices" class="check-row"></div>
+          </div>
+          <div class="form-row">
+            <label class="mini">Shots <input id="e-shots" class="input input-inline" type="number" value="4096" min="1"></label>
+            <button id="e-run" class="btn btn-primary" type="button">Estimate</button>
+            <span id="e-busy" class="inline-busy hidden"><span class="spinner"></span><span id="e-note">estimating…</span></span>
+          </div>
+          <div id="e-result" class="hidden">
+            <div class="table-wrap"><table id="e-table" class="table"></table></div>
+            <div id="e-interpretation" class="prose"></div>
+          </div>
+        </div>
+
+        <div class="panel">
+          <div class="panel-head">
+            <h2>3 · Simulate classically</h2>
+            <span class="hint">Qiskit Aer statevector · SciPy optimiser</span>
+          </div>
+          <div class="form-grid">
+            <label class="field-col">Optimiser
+              <select id="s-optimizer" class="input">
+                <option>COBYLA</option><option>Nelder-Mead</option><option>Powell</option>
+                <option value="L-BFGS-B">L-BFGS-B</option>
+              </select></label>
+            <label class="field-col">Max iterations <input id="s-maxiter" class="input" type="number" value="100" min="1"></label>
+            <label class="field-col">Restarts <input id="s-restarts" class="input" type="number" value="2" min="1" max="20"></label>
+            <label class="field-col">Shots <input id="s-shots" class="input" type="number" value="4096" min="16"></label>
+            <label class="field-col">CVaR α <input id="s-cvar" class="input" type="number" value="1" min="0.01" max="1" step="0.05"></label>
+            <label class="field-col">Seed <input id="s-seed" class="input" type="number" value="1" min="0"></label>
+            <label class="field-col wide">Final sampling
+              <select id="s-noise" class="input"><option value="">Ideal (noiseless) statevector</option></select></label>
+            <label class="field-col wide">Initial angles <input id="s-init" class="input" type="text" placeholder="β…, γ… — blank = random"></label>
+          </div>
+          <label class="check"><input id="s-shot-noise" type="checkbox">
+            <span>Optimise on sampled energies (shot noise), as hardware would</span></label>
+          <p class="help">The angles are tuned on the exact statevector (or on sampled shots), then
+            the tuned circuit is sampled — ideally, or through a device noise model. Noisy simulation is
+            slow (tens of ms per shot), so it is used for the final sampling only. CVaR α &lt; 1
+            optimises the best α-fraction of outcomes instead of the mean.</p>
+          <div class="form-row">
+            <button id="s-run" class="btn btn-primary" type="button">Run QAOA simulation</button>
+            <button id="s-landscape" class="btn" type="button">p = 1 energy landscape</button>
+            <button id="s-stop" class="btn btn-danger hidden" type="button">Stop</button>
+            <span id="s-busy" class="inline-busy hidden"><span class="spinner"></span><span id="s-note">running…</span></span>
+          </div>
+          <div class="panel-grid">
+            <div id="s-trace-panel" class="subpanel hidden">
+              <h3>Optimiser convergence</h3>
+              <div class="legend" id="s-trace-legend"></div>
+              <div id="s-trace" class="chart-host"></div>
+            </div>
+            <div id="s-landscape-panel" class="subpanel hidden">
+              <h3>⟨E⟩ over (β, γ) for p = 1</h3>
+              <div class="landscape-wrap">
+                <canvas id="s-landscape-canvas" aria-label="QAOA p=1 energy landscape"></canvas>
+                <div id="s-landscape-tip" class="qubo-tip hidden"></div>
+              </div>
+              <div class="legend" id="s-landscape-legend"></div>
+              <p id="s-landscape-note" class="help"></p>
+            </div>
+          </div>
+        </div>
+
+        <div id="s-result" class="hidden">
+          <div id="s-stats" class="stat-row"></div>
+          <div class="panel-grid">
+            <div class="panel">
+              <div class="panel-head"><h2>Where the probability goes</h2>
+                <div class="legend" id="s-levels-legend"></div></div>
+              <p class="hint">Probability of each energy level (lowest first) after QAOA, against
+                guessing uniformly at random. The amplification at the low levels is what QAOA buys.</p>
+              <div id="s-levels" class="chart-host"></div>
+              <p id="s-levels-rest" class="help"></p>
+            </div>
+            <div class="panel">
+              <div class="panel-head"><h2>Interpretation</h2></div>
+              <div id="s-interpretation" class="prose"></div>
+            </div>
+          </div>
+          <div class="panel">
+            <div class="panel-head"><h2>Most probable bitstrings</h2>
+              <span class="hint">exact statevector probabilities · click a row to play its plan</span></div>
+            <div class="table-wrap"><table id="s-states" class="table"></table></div>
+          </div>
+          <div class="panel">
+            <div class="panel-head"><h2 id="s-sampled-title">Sampled shots</h2>
+              <div class="legend" id="s-hist-legend"></div></div>
+            <div id="s-hist" class="chart-host"></div>
+            <div class="table-wrap"><table id="s-samples" class="table"></table></div>
+          </div>
+        </div>
+
+        <div class="panel">
+          <div class="panel-head">
+            <h2>4 · Run on IBM Quantum Platform</h2>
+            <span id="i-account" class="pill pill-muted">checking account…</span>
+          </div>
+          <p class="hint">Sends the tuned circuit as one Qiskit Runtime <code>SamplerV2</code> job —
+            the cheap way to use real hardware: angles are tuned in simulation, the QPU only samples.
+            Jobs queue; the GUI keeps their ids so results can be fetched later.</p>
+          <div class="form-grid">
+            <label class="field-col wide">API key (token)
+              <input id="i-token" class="input" type="password" autocomplete="off" placeholder="blank = use the saved account"></label>
+            <label class="field-col wide">Instance (CRN)
+              <input id="i-instance" class="input" type="text" placeholder="optional"></label>
+          </div>
+          <label class="check"><input id="i-save" type="checkbox">
+            <span>Save these credentials as the default account on this machine</span></label>
+          <div class="form-row">
+            <button id="i-connect" class="btn" type="button">Connect &amp; list backends</button>
+            <span id="i-connect-busy" class="inline-busy hidden"><span class="spinner"></span>contacting IBM Quantum…</span>
+          </div>
+          <div class="form-grid">
+            <label class="field-col wide">Backend
+              <select id="i-backend" class="input"></select></label>
+            <label class="field-col">Shots <input id="i-shots" class="input" type="number" value="4096" min="1" max="100000"></label>
+          </div>
+          <div class="form-row">
+            <button id="i-check" class="btn" type="button">Check circuit on backend</button>
+            <button id="i-submit" class="btn btn-primary" type="button">Submit sampling job</button>
+            <span id="i-busy" class="inline-busy hidden"><span class="spinner"></span><span id="i-note">working…</span></span>
+          </div>
+          <div id="i-check-result" class="prose"></div>
+          <h3 class="subhead">Jobs</h3>
+          <div class="form-row">
+            <input id="i-job-id" class="input input-inline job-input" type="text" placeholder="job id, e.g. d0abc…">
+            <label class="check inline"><input id="i-old-sign" type="checkbox"><span>old sign convention</span></label>
+            <button id="i-fetch" class="btn" type="button">Fetch job</button>
+          </div>
+          <div class="table-wrap"><table id="i-jobs" class="table"></table></div>
+          <div id="i-result" class="hidden">
+            <div id="i-stats" class="stat-row"></div>
+            <div class="panel-grid">
+              <div class="subpanel">
+                <h3>Energy of the shots</h3>
+                <div class="legend" id="i-hist-legend"></div>
+                <div id="i-hist" class="chart-host"></div>
+              </div>
+              <div class="subpanel">
+                <h3>Interpretation</h3>
+                <div id="i-interpretation" class="prose"></div>
+              </div>
+            </div>
+            <div class="table-wrap"><table id="i-samples" class="table"></table></div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ============================================================ summary -->
+      <section id="q-summary" class="q-section hidden">
+        <div class="panel">
+          <div class="panel-head">
+            <h2>All runs on this QUBO</h2>
+            <button id="r-export" class="btn btn-ghost" type="button">Download report (JSON)</button>
+          </div>
+          <p class="hint">Every solver run in this session on the loaded QUBO, against the classical
+            IP optimum. Objective = QUBO energy + offset = relocations, for a feasible selection.</p>
+          <div class="legend" id="r-legend"></div>
+          <div id="r-chart" class="chart-host"></div>
+          <div class="table-wrap"><table id="r-table" class="table"></table></div>
+        </div>
+        <div class="panel">
+          <div class="panel-head"><h2>What it means</h2></div>
+          <div id="r-interpretation" class="prose"></div>
+        </div>
+      </section>
+    </div>
+    </div>
   </section>
 </main>
 
 <script src="/static/app.js"></script>
 <script src="/static/qubo.js"></script>
+<script src="/static/charts.js"></script>
+<script src="/static/quantum.js"></script>
 </body>
 </html>

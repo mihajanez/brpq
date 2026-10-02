@@ -1,0 +1,13 @@
+{
+ "instance": "data03-05-03.dat",
+ "name": "data03-05-03.dat",
+ "emptyTiers": 2,
+ "maximumHeight": null,
+ "heightLimit": 5,
+ "ipObjective": 8,
+ "provenOptimal": true,
+ "relocations": 8,
+ "solveSeconds": 0.0,
+ "created": "2026-10-02 07:18:40",
+ "quboLowerBound": 8.0
+}

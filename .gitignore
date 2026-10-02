@@ -11,3 +11,4 @@ rbrp_ip
 .venv/
 qubo.png
 __pycache__/
+quantum_runs/

@@ -215,14 +215,34 @@ def check_groups(variables, selected):
     return violations
 
 
-def move_plan(instance, variables, selected, max_height=None):
+def greedy_destination(bay, src, block, rank, max_height):
+    """Where a block goes when its sequence leaves the move open: onto a stack
+    it does not block (the one whose most urgent block is the least urgent of
+    those), else onto the stack whose most urgent block is least urgent."""
+    best, best_key = None, None
+    for dst, stack in enumerate(bay):
+        if dst == src or (max_height and len(stack) + 1 > max_height):
+            continue
+        most_urgent = min((rank[b] for b in stack), default=len(rank))
+        blocks = most_urgent < rank[block]
+        key = (blocks, most_urgent if not blocks else -most_urgent)
+        if best_key is None or key < best_key:
+            best, best_key = dst, key
+    return best
+
+
+def move_plan(instance, variables, selected, max_height=None, complete=False):
     """Replay the selected sequences into a move plan.
 
     A sequence variable records its moves as (period, src, dst): `period` is the
     retrieval the move belongs to (the rank of the block being dug out) and the
     order *within* a period follows the bay, not the file -- whichever block is
     on top of the target stack moves next. That is how Solution in
-    verify_solution.py walks a selection, and it is what this mirrors."""
+    verify_solution.py walks a selection, and it is what this mirrors.
+
+    With complete=True, moves a provisional sequence leaves undecided (and
+    moves of blocks without any sequence) are filled in by
+    greedy_destination(); the plan then reports how many it filled in."""
     schedule = {}
     provisional = []
     for index in sorted(selected):
@@ -232,7 +252,7 @@ def move_plan(instance, variables, selected, max_height=None):
         if var.complete is False:
             provisional.append(var.name)
         schedule[var.priority] = sorted(var.relocations, key=lambda r: r[0])
-    if provisional:
+    if provisional and not complete:
         return None, ("selection includes provisional sequence(s) "
                       + ", ".join(sorted(provisional))
                       + " whose moves are not fully decided, so no plan can be replayed")
@@ -243,6 +263,7 @@ def move_plan(instance, variables, selected, max_height=None):
     remaining = list(labels)
     cursor = {priority: 0 for priority in schedule}
     relocations = []
+    filled = 0
 
     while remaining:
         target = remaining[0]
@@ -255,16 +276,30 @@ def move_plan(instance, variables, selected, max_height=None):
         priority = rank[block]
         moves = schedule.get(priority)
         index = cursor.get(priority, 0)
-        if not moves or index >= len(moves):
-            return None, (f"block {block} sits on target {target} but its sequence "
-                          "has no move left for it")
+        if not moves or index >= len(moves) or (complete and moves[index][2] == -1):
+            if not complete:
+                return None, (f"block {block} sits on target {target} but its sequence "
+                              "has no move left for it")
+            dst = greedy_destination(bay, stack, block, rank, max_height)
+            if dst is None:
+                return None, f"no stack has room for block {block}"
+            bay[stack].pop()
+            bay[dst].append(block)
+            relocations.append((block, stack + 1, dst + 1))
+            filled += 1
+            continue
         period, src, dst = moves[index]
         if period != rank[target] or src != stack:
             return None, (f"the sequence for block {block} expects to move in "
                           f"retrieval {period + 1} from stack {src + 1}, but it is "
                           f"needed now in retrieval {rank[target] + 1} from stack "
                           f"{stack + 1}")
-        if dst < 0:
+        if dst < 0 and complete:
+            dst = greedy_destination(bay, stack, block, rank, max_height)
+            if dst is None:
+                return None, f"no stack has room for block {block}"
+            filled += 1
+        elif dst < 0:
             return None, f"block {block} has no destination recorded for this move"
         if max_height and len(bay[dst]) + 1 > max_height:
             return None, (f"moving block {block} onto stack {dst + 1} would make it "
@@ -277,7 +312,30 @@ def move_plan(instance, variables, selected, max_height=None):
     steps, error = replay(instance, relocations)
     if error:
         return None, error
-    return {"relocations": relocations, "steps": steps}, None
+    return {"relocations": relocations, "steps": steps, "filled": filled}, None
+
+
+def plan_payload(instance, plan, height_limit, energy=None, label=None):
+    """A replayed selection in the shape the GUI's move-plan player takes --
+    the same fields a solver run carries, so one renderer shows both."""
+    steps = plan["steps"]
+    return {
+        "source": "qubo",
+        "label": label,
+        "filled": plan.get("filled", 0),
+        "ok": True,
+        "instance": instance.as_dict(),
+        "heightLimit": height_limit,
+        "steps": steps,
+        "relocations": [{"number": i + 1, "block": b, "src": s, "dst": d}
+                        for i, (b, s, d) in enumerate(plan["relocations"])],
+        "retrievals": sum(1 for s in steps if s["kind"] == "retrieve"),
+        "objective": len(plan["relocations"]),
+        "energy": energy,
+        "stats": {},
+        "stdout": "", "stderr": "",
+        "wallTime": 0.0, "replayError": None,
+    }
 
 
 def search_selections(instance, variables, terms, limit=200000, max_height=None):
