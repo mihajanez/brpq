@@ -1,0 +1,14 @@
+# Python packages for brpq on HPC (and for the GUI's Quantum tab).
+# The GPU image adds cupy-cuda12x[ctk] on top (see container_setup.sh).
+numpy
+scipy
+networkx
+dimod
+dwave-samplers
+minorminer
+dwave-system
+qiskit>=2.1
+qiskit-aer>=0.17
+qiskit-ibm-runtime
+matplotlib
+pylatexenc
