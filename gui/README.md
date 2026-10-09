@@ -5,8 +5,9 @@ solver parameters, run the classical (Gurobi) IP model and step through the
 resulting move plan — then take the same test case through its QUBO form to a
 D-Wave annealer and to QAOA on IBM hardware, simulated here or run for real.
 
-The results column has two tabs: **Classical solution** (the IP model, as
-before) and **Quantum** (everything built on the exported QUBO).
+The results column has three tabs: **Classical solution** (the IP model, as
+before), **Quantum** (everything built on the exported QUBO) and **HPC · FRIDA**
+(the same work as Slurm batch jobs on a cluster).
 
 ## Run
 
@@ -112,6 +113,25 @@ greedily (onto a stack the block does not block, if there is one), and the plan
 says how many moves were filled in, since it can need more relocations than the
 energy promises.
 
+* **HPC · FRIDA** — runs the classical solver and the classical simulations of the
+  quantum algorithms as Slurm array jobs on FRIDA (UL FRI) or any Slurm cluster over SSH;
+  see [hpc/README.md](../hpc/README.md).
+  * *Connect*: an ssh host alias (FRIDA: from `tsh config`, after `tsh login` — the GUI never
+    handles passwords or MFA), the remote base directory, Slurm account and the Gurobi
+    licence path on the cluster. *Copy project to cluster* sends the project as a tar over
+    ssh; *Build CPU/GPU image* submits `hpc/build_image.sbatch`, which saves an Enroot image
+    with Gurobi, Ocean, Qiskit/Aer (and CuPy).
+  * *Build a job*: classical IP solves or full pipelines (solve, export, samplers, QAOA) for
+    any number of test cases, or quantum runs on the loaded QUBO — one array task each;
+    resources per task (partition, time, CPUs, memory, GPU type, QAOA simulator: Aer on
+    CPU, CuPy on GPU or numpy, maximum qubits). *Preview* shows `job.sbatch`, `step.sh` and
+    `spec.json`.
+  * *Jobs*: Slurm state per array, result files present, per-task logs, cancel; *Fetch*
+    copies the job back to `quantum_runs/hpc/<name>/` and summarises it. Classical results
+    open in the player, exported QUBOs load into the Quantum tab, samples play as plans and
+    quantum runs join the comparison.
+  * Transport *This machine* runs the same job directories locally (sbatch if present,
+    else one task after another), for testing or when the GUI runs on a login node.
 * **Settings** — light / dark / follow-system appearance.
 * **Header** — the exact command that will run, the solver-binary status and the
   Run button. While a solve is in flight that button turns into **Stop solver**
@@ -154,7 +174,8 @@ press *Save*.
 | `runner.py` | builds the `rbrp_ip` command line, runs it, parses stdout/stderr |
 | `qubo.py` | reads an exported `.qubo` file, scores selections, replays one into a plan |
 | `quantum.py` | the Quantum tab's back end: sample scoring, embedding, D-Wave samplers and timing model, QAOA build / estimates / simulation / landscape, IBM Runtime, exports, background jobs |
-| `static/` | `index.html`, `styles.css`, `app.js`, `qubo.js`, `charts.js` (SVG charts), `quantum.js` |
+| `hpc.py` | the HPC tab's back end: ssh transport, project sync, image builds, Slurm array scripts, job registry (`quantum_runs/hpc/jobs.json`), status, logs, fetch and summaries |
+| `static/` | `index.html`, `styles.css`, `app.js`, `qubo.js`, `charts.js` (SVG charts), `quantum.js`, `hpc.js` |
 
 Long quantum computations (sampling, QAOA optimisation, estimates, the landscape,
 job submission) run as background jobs the browser polls through

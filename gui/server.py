@@ -23,6 +23,7 @@ import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs
 
+from . import hpc
 from . import qubo as qubo_model
 from .brp_instance import effective_tiers, read_instance, validate_bay, write_dat
 from .runner import ROOT, BINARY, Options, solve, stop_runs
@@ -304,6 +305,10 @@ class Handler(BaseHTTPRequestHandler):
             self.quantum_get(route[len("/api/quantum/"):], query)
             return
 
+        if route.startswith("/api/hpc/"):
+            self.hpc_request(route[len("/api/hpc/"):], {k: v[0] for k, v in query.items()})
+            return
+
         if route == "/api/instance":
             name = (query.get("name") or [""])[0]
             try:
@@ -329,7 +334,8 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         route = urlparse(self.path).path
         if route not in ("/api/solve", "/api/save-instance", "/api/stop",
-                         "/api/qubo-eval") and not route.startswith("/api/quantum/"):
+                         "/api/qubo-eval") and not route.startswith(("/api/quantum/",
+                                                                      "/api/hpc/")):
             self.send_error(404, "not found")
             return
         length = int(self.headers.get("Content-Length") or 0)
@@ -351,6 +357,10 @@ class Handler(BaseHTTPRequestHandler):
 
         if route.startswith("/api/quantum/"):
             self.quantum_post(route[len("/api/quantum/"):], payload)
+            return
+
+        if route.startswith("/api/hpc/"):
+            self.hpc_request(route[len("/api/hpc/"):], payload)
             return
 
         if route == "/api/save-instance":
@@ -600,6 +610,48 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_json({"error": f"unknown action {action}"}, status=404)
         except Exception as exc:
             self.send_json({"error": f"{type(exc).__name__}: {exc}"}, status=400)
+
+    # ----------------------------------------------------------------- HPC
+    HPC_ACTIONS = {
+        "info": lambda p: hpc.info(),
+        "config": lambda p: {"config": hpc.public_config(hpc.save_config(p))},
+        "check": lambda p: hpc.check(p or None),
+        "sync": lambda p: hpc.sync(),
+        "build-image": lambda p: hpc.build_image(p.get("variant") or "cpu",
+                                                 p.get("gurobiVersion") or None),
+        "preview": lambda p: {k: v for k, v in hpc.prepare(p).items()
+                              if not k.startswith("_")},
+        "submit": lambda p: hpc.submit(p),
+        "refresh": lambda p: {"jobs": hpc.refresh()},
+        "jobs": lambda p: {"jobs": hpc.jobs()},
+        "cancel": lambda p: hpc.cancel(p.get("name")),
+        "log": lambda p: hpc.log(p.get("name"), p.get("task") or 0, p.get("lines") or 200),
+        "fetch": lambda p: hpc.fetch(p.get("name")),
+        "results": lambda p: hpc.results(p.get("name")),
+        "task": lambda p: hpc.task_result(p.get("name"), p.get("id")),
+        "import-qubo": lambda p: hpc.import_qubo(p.get("name"), p.get("path")),
+    }
+
+    def hpc_request(self, action, payload):
+        """FRIDA / Slurm jobs: everything goes through gui/hpc.py."""
+        handler = self.HPC_ACTIONS.get(action)
+        if handler is None:
+            self.send_json({"error": f"unknown HPC action {action}"}, status=404)
+            return
+        if action in ("submit", "build-image", "cancel", "sync", "fetch"):
+            print(f"[gui] hpc {action} {payload.get('name') or payload.get('mode') or ''}")
+        try:
+            result = handler(payload or {})
+        except hpc.HpcError as exc:
+            self.send_json({"error": str(exc)}, status=400)
+            return
+        except Exception as exc:
+            self.send_json({"error": f"{type(exc).__name__}: {exc}"}, status=500)
+            return
+        if quantum is not None:
+            self.send_quantum(result)
+        else:
+            self.send_json(result)
 
     def save_instance(self, payload):
         """Store a designed bay as data/custom/<name>.dat so it can be reloaded."""

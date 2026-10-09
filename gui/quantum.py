@@ -33,7 +33,11 @@ from .runner import ROOT
 if ROOT not in sys.path:                      # qaoa_qubo.py / load_qubo.py live there
     sys.path.insert(0, ROOT)
 
-EXACT_LIMIT = 24          # brute force / statevector up to this many variables
+# brute force / statevector up to this many variables; HPC jobs raise it
+EXACT_LIMIT = int(os.environ.get("BRPQ_EXACT_LIMIT") or 24)
+# how QAOA probabilities are computed: Qiskit Aer (default), or the same state by
+# direct statevector algebra with numpy, or with CuPy on an NVIDIA GPU
+QAOA_BACKEND = (os.environ.get("BRPQ_QAOA_BACKEND") or "aer").lower()
 DRAW_LIMIT = 2500         # gates; bigger circuits are offered as downloads only
 RUNS_DIR = os.path.join(ROOT, "quantum_runs")
 IBM_JOBS_FILE = os.path.join(RUNS_DIR, "ibm-jobs.json")
@@ -114,6 +118,7 @@ def status():
         "ibm": ibm,
         "dwave": dwave,
         "exactLimit": EXACT_LIMIT,
+        "qaoaBackend": QAOA_BACKEND,
         "python": sys.executable,
     }
 
@@ -990,7 +995,7 @@ def qaoa_estimate(job, problem, opts):
            "feasible": problem.n <= EXACT_LIMIT}
     if problem.n <= EXACT_LIMIT:
         job.note("timing one statevector evaluation…")
-        evaluator = _StatevectorEvaluator(problem, reps, seed=1)
+        evaluator = make_evaluator(problem, reps, seed=1)
         x = np.full(2 * reps, 0.3)
         evaluator.probabilities(x)                     # warm-up
         started = time.time()
@@ -1040,6 +1045,63 @@ def numpy_qaoa_probabilities(energy, n, betas, gammas):
             view[:, 1, :] = s * a + c * b
             psi = view.reshape(-1)
     return np.abs(psi) ** 2
+
+
+class _ArrayEvaluator:
+    """QAOA probabilities by direct statevector algebra -- the state of the
+    Qiskit circuit (see numpy_qaoa_probabilities), on numpy or, with
+    BRPQ_QAOA_BACKEND=cupy, on an NVIDIA GPU. No circuit is built, so it
+    scales to whatever the memory holds: about 48 bytes x 2^n at the peak
+    (n = 30 on an 80 GB GPU, 31 on 180 GB, 32 on 288 GB)."""
+
+    CHUNK = 1 << 24
+
+    def __init__(self, problem, reps, backend="numpy"):
+        if backend == "cupy":
+            import cupy as xp
+        else:
+            xp = np
+        self.xp = xp
+        self.backend = backend
+        self.n = problem.n
+        self.reps = reps
+        self.energy = xp.asarray(problem.vectors()["energy"], dtype=xp.float64)
+        names = [f"beta[{k}]" for k in range(reps)] + [f"gamma[{k}]" for k in range(reps)]
+        self.params = [type("P", (), {"name": nm})() for nm in names]
+        self.label = ("CuPy statevector (GPU)" if backend == "cupy"
+                      else "numpy statevector")
+
+    def probabilities(self, x):
+        xp, n = self.xp, self.n
+        x = [float(v) for v in x]
+        betas, gammas = x[:self.reps], x[self.reps:]
+        psi = xp.full(1 << n, 1 / math.sqrt(1 << n), dtype=xp.complex128)
+        for beta, gamma in zip(betas, gammas):
+            for start in range(0, 1 << n, self.CHUNK):        # cost phase, in chunks
+                stop = min(start + self.CHUNK, 1 << n)
+                psi[start:stop] *= xp.exp(-1j * gamma * self.energy[start:stop])
+            c, s = math.cos(beta), -1j * math.sin(beta)
+            for q in range(n):                                 # Rx(2 beta) on qubit q
+                view = psi.reshape(-1, 2, 1 << q)
+                a = view[:, 0, :].copy()
+                b = view[:, 1, :]
+                view[:, 0, :] = c * a + s * b
+                view[:, 1, :] = s * a + c * b
+                del a
+        probs = xp.abs(psi) ** 2
+        del psi
+        if xp is not np:
+            probs = xp.asnumpy(probs)
+        return probs
+
+
+def make_evaluator(problem, reps, seed=1):
+    """The QAOA probability engine chosen by BRPQ_QAOA_BACKEND."""
+    if QAOA_BACKEND in ("numpy", "cupy"):
+        return _ArrayEvaluator(problem, reps, QAOA_BACKEND)
+    evaluator = _StatevectorEvaluator(problem, reps, seed)
+    evaluator.label = "Qiskit Aer statevector"
+    return evaluator
 
 
 def _cvar(probs, energy, alpha):
@@ -1095,7 +1157,7 @@ def qaoa_run(job, problem, ctx, opts):
     optimum = problem.optimum()
     e_min, e_max = optimum["energy"], optimum["maxEnergy"]
     at_opt = np.isclose(energy, e_min)
-    evaluator = _StatevectorEvaluator(problem, reps, seed)
+    evaluator = make_evaluator(problem, reps, seed)
     rng = np.random.default_rng(seed)
     scale = max(1.0, problem.coefficient_scale())
 
@@ -1186,6 +1248,7 @@ def qaoa_run(job, problem, ctx, opts):
 
     return {
         "reps": reps, "optimizer": optimizer, "maxiter": maxiter, "restarts": restarts,
+        "simulator": getattr(evaluator, "label", None),
         "cvar": alpha, "shotNoise": shot_noise, "seed": seed,
         "parameters": [float(v) for v in best_x],
         "parameterNames": [p.name for p in evaluator.params],
