@@ -132,6 +132,8 @@ function setView(view) {
   });
   $('view-classical').classList.toggle('hidden', view !== 'classical');
   $('view-quantum').classList.toggle('hidden', view !== 'quantum');
+  if ($('view-hpc')) $('view-hpc').classList.toggle('hidden', view !== 'hpc');
+  if (view === 'hpc' && typeof onHpcShown === 'function') onHpcShown();
   if (view === 'quantum') {
     renderPipeline();
     if (Q.sub === 'anneal' && Q.embedding) drawEmbedding();

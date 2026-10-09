@@ -134,6 +134,9 @@
       <button class="main-tab" type="button" role="tab" data-view="quantum"
               aria-selected="false">Quantum
         <span id="quantum-badge" class="tab-badge">no QUBO</span></button>
+      <button class="main-tab" type="button" role="tab" data-view="hpc"
+              aria-selected="false">HPC · FRIDA
+        <span id="hpc-badge" class="tab-badge">not connected</span></button>
     </nav>
 
     <div id="view-classical" class="view">
@@ -640,6 +643,150 @@
       </section>
     </div>
     </div>
+
+    <div id="view-hpc" class="view hidden">
+      <div class="panel">
+        <div class="panel-head">
+          <h2>1 · Connect to the cluster</h2>
+          <span id="h-conn" class="pill pill-muted">not checked</span>
+        </div>
+        <p class="hint">FRIDA (UL FRI) logs in through Teleport with MFA, which this app never
+          handles. In a terminal on this computer run
+          <code>tsh login --proxy=rdc.si --user=&lt;you&gt;</code> and add the output of
+          <code>tsh config</code> to <code>~/.ssh/config</code>; once <code>ssh login-frida hostname</code>
+          works without a prompt, so does this tab. Step by step: <code>hpc/README.md</code>.</p>
+        <div class="form-grid">
+          <label class="field-col">Transport
+            <select id="h-transport" class="input">
+              <option value="ssh">SSH to a Slurm cluster</option>
+              <option value="local">This machine (testing)</option>
+            </select></label>
+          <label class="field-col">SSH host <input id="h-host" class="input" type="text" value="login-frida"></label>
+          <label class="field-col wide">Remote base directory <input id="h-base" class="input" type="text" value="~/brpq"></label>
+          <label class="field-col">Slurm account <input id="h-account" class="input" type="text" placeholder="default"></label>
+          <label class="field-col wide">Gurobi licence file on the cluster <input id="h-license" class="input" type="text" value="~/gurobi.lic"></label>
+        </div>
+        <div class="form-row">
+          <button id="h-check" class="btn btn-primary" type="button">Save &amp; test connection</button>
+          <button id="h-sync" class="btn" type="button">Copy project to cluster</button>
+          <button id="h-image-cpu" class="btn" type="button">Build CPU image</button>
+          <button id="h-image-gpu" class="btn" type="button">Build GPU image</button>
+          <span id="h-conn-busy" class="inline-busy hidden"><span class="spinner"></span><span>working…</span></span>
+        </div>
+        <div id="h-facts" class="stat-row stat-row-tight"></div>
+        <p id="h-conn-note" class="help"></p>
+      </div>
+
+      <div class="panel">
+        <div class="panel-head"><h2>2 · Build a job</h2>
+          <span class="hint">one Slurm array task per test case or per quantum setting</span></div>
+        <div class="seg" id="h-mode" role="tablist">
+          <button class="seg-btn is-active" type="button" data-mode="classical">Classical IP solve</button>
+          <button class="seg-btn" type="button" data-mode="pipeline">Full pipeline per test case</button>
+          <button class="seg-btn" type="button" data-mode="quantum">Quantum simulation of the loaded QUBO</button>
+        </div>
+        <p id="h-mode-help" class="help"></p>
+
+        <div id="h-instances-block">
+          <div class="form-row">
+            <input id="h-filter" class="input input-inline" type="text" placeholder="filter, e.g. data05-">
+            <button id="h-select-shown" class="btn btn-small" type="button">Select shown</button>
+            <button id="h-select-current" class="btn btn-small" type="button">Current test case</button>
+            <button id="h-select-none" class="btn btn-small" type="button">Clear</button>
+            <span id="h-count" class="hint"></span>
+          </div>
+          <select id="h-instances" class="input" multiple size="8" aria-label="Test cases"></select>
+          <p class="help">Solver parameters (-E, -T, time limit, threshold, …) come from the sidebar.
+            Gurobi threads default to the CPUs requested below.</p>
+        </div>
+        <p id="h-qubo-block" class="hint hidden">QUBO: <strong id="h-qubo-name">none loaded</strong></p>
+
+        <div id="h-quantum-block" class="hidden">
+          <h3 class="subhead">Annealing samplers (D-Wave Ocean, classical)</h3>
+          <div id="h-anneal-methods" class="form-row"></div>
+          <div class="form-grid">
+            <label class="field-col">Reads <input id="h-reads" class="input" type="number" value="1000" min="1"></label>
+            <label class="field-col">Sweeps <input id="h-sweeps" class="input" type="number" value="1000" min="10"></label>
+            <label class="field-col">Topology (embedded SA)
+              <select id="h-topology" class="input">
+                <option value="pegasus">Pegasus P16 (Advantage)</option>
+                <option value="zephyr">Zephyr Z12 (Advantage2)</option>
+                <option value="chimera">Chimera C16 (2000Q)</option>
+              </select></label>
+          </div>
+          <h3 class="subhead">QAOA simulation</h3>
+          <div class="form-grid">
+            <label class="field-col">Depths p <input id="h-reps" class="input" type="text" value="1,2" placeholder="e.g. 1,2,3; blank = none"></label>
+            <label class="field-col">Restarts <input id="h-restarts" class="input" type="number" value="4" min="1" max="20"></label>
+            <label class="field-col">Max iterations <input id="h-maxiter" class="input" type="number" value="200" min="1"></label>
+            <label class="field-col">Shots <input id="h-shots" class="input" type="number" value="4096" min="16"></label>
+            <label class="field-col">CVaR α <input id="h-cvar" class="input" type="number" value="1" min="0.01" max="1" step="0.05"></label>
+            <label class="field-col">Optimiser
+              <select id="h-optimizer" class="input">
+                <option>COBYLA</option><option>Nelder-Mead</option><option>Powell</option>
+                <option value="L-BFGS-B">L-BFGS-B</option>
+              </select></label>
+            <label class="field-col wide">Final sampling
+              <select id="h-noise" class="input"><option value="">Ideal (noiseless) statevector</option></select></label>
+          </div>
+        </div>
+
+        <h3 class="subhead">Resources per array task</h3>
+        <div class="form-grid">
+          <label class="field-col">Partition <select id="h-partition" class="input"></select></label>
+          <label class="field-col">Time limit <input id="h-time" class="input" type="text" value="04:00:00" placeholder="HH:MM:SS or D-HH:MM:SS"></label>
+          <label class="field-col">CPUs <input id="h-cpus" class="input" type="number" value="16" min="1" max="384"></label>
+          <label class="field-col">Memory (GB) <input id="h-mem" class="input" type="number" value="64" min="1"></label>
+          <label class="field-col">GPU <select id="h-gpu" class="input"><option value="">none</option></select></label>
+          <label class="field-col">QAOA simulator
+            <select id="h-backend" class="input">
+              <option value="aer">Qiskit Aer statevector (CPU)</option>
+              <option value="cupy">CuPy statevector (NVIDIA GPU)</option>
+              <option value="numpy">numpy statevector (CPU)</option>
+            </select></label>
+          <label class="field-col">Max qubits simulated <input id="h-exact" class="input" type="number" value="30" min="8" max="36"></label>
+          <label class="field-col">Max parallel tasks <input id="h-parallel" class="input" type="number" value="0" min="0" placeholder="0 = no limit"></label>
+          <label class="field-col wide">Job name <input id="h-name" class="input" type="text" placeholder="e.g. sweep-03xx"></label>
+        </div>
+        <p id="h-res-note" class="help"></p>
+        <div class="form-row">
+          <button id="h-preview" class="btn" type="button">Preview job script</button>
+          <button id="h-submit" class="btn btn-primary" type="button">Submit to Slurm</button>
+          <span id="h-submit-busy" class="inline-busy hidden"><span class="spinner"></span><span>submitting…</span></span>
+        </div>
+        <div id="h-preview-box" class="hidden">
+          <div class="seg" id="h-preview-tabs">
+            <button class="seg-btn is-active" type="button" data-file="sbatch">job.sbatch</button>
+            <button class="seg-btn" type="button" data-file="step">step.sh</button>
+            <button class="seg-btn" type="button" data-file="spec">spec.json</button>
+          </div>
+          <p id="h-preview-notes" class="help"></p>
+          <pre id="h-preview-text" class="log"></pre>
+        </div>
+      </div>
+
+      <div class="panel">
+        <div class="panel-head"><h2>3 · Jobs</h2>
+          <div class="form-row">
+            <label class="field-col">log of task <input id="h-log-task" class="input input-inline" type="number" value="0" min="0"></label>
+            <button id="h-refresh" class="btn btn-ghost" type="button">Refresh status</button>
+          </div></div>
+        <div class="table-wrap"><table id="h-jobs" class="table"></table></div>
+        <pre id="h-log" class="log hidden"></pre>
+      </div>
+
+      <div id="h-results-panel" class="panel hidden">
+        <div class="panel-head"><h2 id="h-results-title">Results</h2>
+          <span id="h-results-dir" class="hint"></span></div>
+        <div id="h-results-stats" class="stat-row stat-row-tight"></div>
+        <div class="table-wrap"><table id="h-results" class="table"></table></div>
+        <p class="help">Objective = relocations (QUBO energy + offset for a feasible selection).
+          <em>Solution</em> opens a classical result in the player; <em>Load QUBO</em> copies a
+          cluster export into <code>qubo/</code> and opens it in the Quantum tab; <em>Plan</em> plays the
+          best replayable sample; <em>Compare</em> adds a quantum run to the Quantum tab's comparison
+          when the same QUBO is loaded. Everything fetched is under <code>quantum_runs/hpc/</code>.</p>
+      </div>
+    </div>
   </section>
 </main>
 
@@ -647,5 +794,6 @@
 <script src="/static/qubo.js"></script>
 <script src="/static/charts.js"></script>
 <script src="/static/quantum.js"></script>
+<script src="/static/hpc.js"></script>
 </body>
 </html>
