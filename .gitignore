@@ -12,3 +12,4 @@ rbrp_ip
 qubo.png
 __pycache__/
 quantum_runs/
+.build.lock

@@ -52,6 +52,17 @@ estimates, Aer simulation, IBM Quantum jobs) and compares every run with the IP
 optimum — see [gui/README.md](gui/README.md). The classical tab needs only the
 standard library; the quantum tab needs the `.venv`.
 
+## HPC (FRIDA)
+
+Classical solves and classical simulations of the quantum algorithms can run as Slurm
+array jobs on FRIDA, the UL FRI cluster, from the GUI's **HPC · FRIDA** tab or by hand:
+one task per test case or per quantum setting, inside an Enroot image with Gurobi, Ocean,
+Qiskit and (optionally) CuPy for GPU statevector simulation. Setup and usage:
+[hpc/README.md](hpc/README.md).
+
+    python3 hpc/brpq_job.py run jobs/x/spec.json --task 0   # what each array task runs
+    python3 hpc/brpq_job.py summarize jobs/x                # results/summary.csv
+
 ## QAOA and re-scoring saved runs
 
     .venv/bin/python qaoa_qubo.py problem.qubo -p 1 --save run.json
