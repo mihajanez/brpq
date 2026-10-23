@@ -9,7 +9,7 @@ import time
 from .brp_instance import effective_tiers, replay
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-BINARY = os.path.join(ROOT, "rbrp_ip")
+BINARY = os.path.join(ROOT, "rbrp_ip.exe" if os.name == "nt" else "rbrp_ip")
 
 RELOCATION_RE = re.compile(r"^Relocation\s+(\d+):\s*\[\s*(-?\d+)\s*\]\s*(\d+)->(\d+)")
 STAT_RE = re.compile(r"^([a-z_]+)=(.*)$")
