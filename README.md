@@ -80,3 +80,11 @@ IBM Quantum jobs downloaded from the platform (`--ibm-job info.json
 result.json`), mapping the device's measured bits back to QUBO variables via
 the circuit's layout. Jobs submitted before the Ising sign fix (for example
 `damhugf8gn2s739lf5e0`) need `--old-sign`.
+
+## Windows installer
+
+Pushing a tag `v<version>` (or running the *Windows installer* workflow manually)
+builds the GUI with PyInstaller, wraps it with Inno Setup and attaches
+`brpq-setup-<version>.exe` to a GitHub Release. The installer is per-user and
+ships the GUI only; the Gurobi-based `rbrp_ip.exe` solver must be built locally
+(it needs Gurobi and Boost) and placed in the installed `_internal` folder.
