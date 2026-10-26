@@ -13,3 +13,5 @@ qubo.png
 __pycache__/
 quantum_runs/
 .build.lock
+
+qubo/
